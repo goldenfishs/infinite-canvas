@@ -1,4 +1,4 @@
-import { Bot, Cloud, Menu } from "lucide-react";
+import { Bot, Cloud, ListTodo, Menu, Shield } from "lucide-react";
 import { Button, Tooltip } from "antd";
 import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -9,6 +9,7 @@ import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
+import { useLumiviaAccount } from "@/components/layout/lumivia-account";
 import { useAgentStore } from "@/stores/use-agent-store";
 
 export function AppTopNav() {
@@ -17,6 +18,7 @@ export function AppTopNav() {
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const togglePanel = useAgentStore((state) => state.togglePanel);
     const panelOpen = useAgentStore((state) => state.panelOpen);
+    const admin = useLumiviaAccount((state) => state.account?.isAdmin);
     const hideHeader = /^\/canvas\/[^/]+/.test(pathname);
     const slug = pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
@@ -75,6 +77,8 @@ export function AppTopNav() {
                             <Tooltip title={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")}>
                                 <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" icon={<Bot className="size-4" />} onClick={togglePanel} aria-label={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")} />
                             </Tooltip>
+                            <Link to="/jobs" aria-label="生成中心" title="生成中心" className="inline-flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-muted"><ListTodo className="size-4" /></Link>
+                            {admin && <Link to="/admin/canvas" aria-label="运营后台" title="运营后台" className="inline-flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-muted"><Shield className="size-4" /></Link>}
                             <Link to="/storage" aria-label="云图库" title="云图库" className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-foreground hover:bg-muted">
                                 <Cloud className="size-4" />
                             </Link>

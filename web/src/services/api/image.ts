@@ -1,16 +1,18 @@
 import axios from "axios";
 
 import i18n from "@/i18n";
-import { lumiviaImageAccount, lumiviaImageHeaders } from "@/components/layout/lumivia-account";
+import { lumiviaImageAccount } from "@/components/layout/lumivia-account";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
 import { requestLumiviaChat } from "./lumivia-chat";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
-import { imageToDataUrl } from "@/services/image-storage";
+import { blobToDataUrl, imageToDataUrl } from "@/services/image-storage";
 import { imageSizePresets, inferMediaScale } from "@/lib/media-size";
 import type { ReferenceImage } from "@/types/image";
+import { canvasJobs, waitForCanvasJob } from "./canvas-jobs";
+import { cloudStorage } from "./cloud-storage";
 
 const apiText = (key: string, options?: Record<string, unknown>) => i18n.t(`apiErrors.${key}`, options);
 
@@ -677,9 +679,41 @@ function parseGeminiImagePayload(payload: GeminiPayload) {
     return images;
 }
 
+export async function requestHostedImages(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions, id = crypto.randomUUID().replaceAll("-", "")) {
+    const account = lumiviaImageAccount();
+    const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel, "image");
+    const count = Math.floor(Math.abs(Number(config.count)) || 1);
+    if (count > 4) throw new Error("每次最多生成 4 张图片");
+    if (references.length > 8) throw new Error("每次最多上传 8 张参考图");
+    const signal = options?.signal || AbortSignal.timeout(3_650_000);
+    const files = [];
+    for (const image of references) {
+        files.push(dataUrlToFile({ ...image, dataUrl: await imageToDataUrl(image, { signal }) }));
+    }
+    const initial = await canvasJobs.create("image", {
+        id, model: requestConfig.model, prompt: withSystemPrompt(requestConfig, buildImageReferencePromptText(prompt, references)), count,
+        size: resolveRequestSize(config.size) || "auto", quality: normalizeQuality(config.quality) || "auto",
+        ...(normalizeBackground(config.background) ? { background: normalizeBackground(config.background) } : {}),
+    }, files, signal, account);
+    return waitForCanvasJob(initial, signal, account);
+}
+
+async function hostedImageContents(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
+    const account = lumiviaImageAccount();
+    const task = await requestHostedImages(config, prompt, references, options);
+    if (!task.assets.length) throw new Error(task.message || "任务未生成可用图片，详情见生成记录");
+    const images = [];
+    for (const file of task.assets) {
+        const timeout = AbortSignal.timeout(60_000);
+        const signal = options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+        images.push({ id: file.id, dataUrl: await blobToDataUrl(await cloudStorage.material(file.id, signal, account)) });
+    }
+    return images;
+}
+
 export async function requestGeneration(config: AiConfig, prompt: string, options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel, "image");
-    const account = lumiviaImageAccount();
+    if (requestConfig.apiKey === "canvas-session") return hostedImageContents(config, prompt, [], options);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const script = resolveModelScript(config, config.model || config.imageModel);
     if (script) {
@@ -726,7 +760,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                 output_format: IMAGE_OUTPUT_FORMAT,
             },
             {
-                headers: { "Content-Type": "application/json", ...await lumiviaImageHeaders("generations", account, options?.signal) },
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${requestConfig.apiKey}` },
                 signal: options?.signal,
                 timeout: IMAGE_REQUEST_TIMEOUT_MS,
             },
@@ -740,7 +774,7 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
 
 export async function requestEdit(config: AiConfig, prompt: string, references: ReferenceImage[], options?: RequestOptions) {
     const requestConfig = resolveModelRequestConfig(config, config.model || config.imageModel, "image");
-    const account = lumiviaImageAccount();
+    if (requestConfig.apiKey === "canvas-session") return hostedImageContents(config, prompt, references, options);
     const n = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const requestPrompt = buildImageReferencePromptText(prompt, references);
     const script = resolveModelScript(config, config.model || config.imageModel);
@@ -798,7 +832,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     files.forEach((file) => formData.append(imageField, file));
 
     try {
-        const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: await lumiviaImageHeaders("edits", account, options?.signal), signal: options?.signal, timeout: IMAGE_REQUEST_TIMEOUT_MS });
+        const response = await axios.post<ImageApiResponse>(aiApiUrl(requestConfig, "/images/edits"), formData, { headers: { Authorization: `Bearer ${requestConfig.apiKey}` }, signal: options?.signal, timeout: IMAGE_REQUEST_TIMEOUT_MS });
         const images = await parseImagePayload(response.data);
         return images;
     } catch (error) {

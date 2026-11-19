@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, CloudUpload, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
@@ -6,6 +7,7 @@ import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
+import { CloudFileActions } from "@/components/cloud-file-actions";
 import { ModelPicker } from "@/components/model-picker";
 import { lumiviaImageAccount, useLumiviaAccount } from "@/components/layout/lumivia-account";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
@@ -16,10 +18,11 @@ import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } f
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { dataUrlToFile, formatBytes, formatDuration, getDataUrlByteSize } from "@/lib/image-utils";
-import { cloudStorage } from "@/services/api/cloud-storage";
+import { cloudStorage, type CloudFile } from "@/services/api/cloud-storage";
+import type { CanvasJob } from "@/services/api/canvas-jobs";
 import { getThumbnailDimensions } from "@/lib/image-thumbnail";
-import { requestEdit, requestGeneration } from "@/services/api/image";
-import { deleteStoredImages, ensureImagePreview, fetchImageBlob, getImageBlob, getImagePreviewRevision, imageToDataUrl, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
+import { requestEdit, requestGeneration, requestHostedImages } from "@/services/api/image";
+import { blobToDataUrl, deleteStoredImages, ensureImagePreview, fetchImageBlob, getImageBlob, getImagePreviewRevision, imageToDataUrl, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import type { ReferenceImage } from "@/types/image";
@@ -93,6 +96,8 @@ export default function ImagePage() {
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [results, setResults] = useState<GenerationResult[]>([]);
+    const [cloudJob, setCloudJob] = useState<CanvasJob>();
+    const cloudRequest = useRef<AbortController>(null);
     const [logs, setLogs] = useState<LogSummary[]>([]);
     const [visibleCount, setVisibleCount] = useState(LOG_PAGE_SIZE);
     const [legacyKeys, setLegacyKeys] = useState<string[]>([]);
@@ -122,10 +127,16 @@ export default function ImagePage() {
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const checkingAccount = useLumiviaAccount((state) => !state.account && state.syncing);
-    const signedIn = useLumiviaAccount((state) => !!state.account);
+    const accountId = useLumiviaAccount((state) => state.account?.id);
+    const signedIn = accountId !== undefined;
     const accountError = useLumiviaAccount((state) => state.error);
     const canGenerate = Boolean(prompt.trim()) && isAiConfigReady(effectiveConfig, model);
-    const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
+    const generationCount = Math.max(1, Math.min(4, Math.floor(Number(config.count) || 1)));
+
+    useEffect(() => {
+        setCloudJob(undefined);
+        return () => cloudRequest.current?.abort();
+    }, [accountId]);
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -229,10 +240,33 @@ export default function ImagePage() {
         if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: undefined });
         previewVersion.current++;
         setPreviewLog(null);
+        setCloudJob(undefined);
         const slots = Array.from({ length: generationCount }, () => ({ id: nanoid(), status: "pending" as const }));
         setResults(slots);
         const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
+
+        if (signedIn) {
+            const controller = new AbortController();
+            cloudRequest.current = controller;
+            try {
+                const task = await requestHostedImages({ ...snapshot.config, count: String(generationCount) }, snapshot.text, snapshot.references, { signal: controller.signal });
+                setResults([]);
+                setCloudJob(task);
+                if (agentTaskId) updateAgentTask(agentTaskId, { status: task.assets.length ? "succeeded" : "failed", successCount: task.assets.length,
+                    failCount: generationCount - task.assets.length, error: task.assets.length ? undefined : task.message });
+                if (task.assets.length) message.success(t("imageWorkbench.generated"));
+            } catch (error) {
+                if (controller.signal.aborted) return;
+                setResults([]);
+                if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", error: (error as Error).message });
+                message.error((error as Error).message);
+            } finally {
+                busy.current = false;
+                setRunning(false);
+            }
+            return;
+        }
 
         const tasks = slots.map((slot) => runGenerationSlot(slot.id, snapshot));
 
@@ -434,6 +468,7 @@ export default function ImagePage() {
             const raw = pendingLogs.current.get(summary.id) ?? await logStore.getItem<GenerationLog>(summary.id);
             if (!raw) throw new Error("找不到这条本机记录");
             const log = await normalizeLog(raw);
+            setCloudJob(undefined);
             if (version !== previewVersion.current || removedLogs.current.has(summary.id)) return;
             setPreviewLog(log);
             setLogsOpen(false);
@@ -513,6 +548,17 @@ export default function ImagePage() {
         }
     };
 
+    async function reuseCloudImage(file: CloudFile, index: number, save: boolean) {
+        try {
+            const blob = await cloudStorage.material(file.id, AbortSignal.timeout(60_000));
+            const dataUrl = await blobToDataUrl(blob);
+            const image = { id: file.id, dataUrl, mimeType: file.mime, durationMs: 0, width: 0, height: 0, bytes: blob.size };
+            await (save ? saveResultToAssets(image, index) : addResultToReferences(image, index));
+        } catch (error) {
+            message.error((error as Error).message);
+        }
+    }
+
     return (
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
@@ -538,7 +584,7 @@ export default function ImagePage() {
                         <div>
                             <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
-                                    <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">{t("imageWorkbench.title")}</h1>
+                                    <div className="flex flex-wrap items-center gap-3"><h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">{t("imageWorkbench.title")}</h1><Link to="/jobs" className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground">生成记录</Link></div>
                                 </div>
                                 <div className="flex shrink-0 gap-2 lg:hidden">
                                     <Button icon={<History className="size-4" />} onClick={() => setLogsOpen(true)}>
@@ -655,7 +701,19 @@ export default function ImagePage() {
                             </div>
                             {running ? <Tag className="m-0 px-2 py-1">{t("workbench.waiting", { time: formatDuration(elapsedMs) })}</Tag> : null}
                         </div>
-                        {results.length ? (
+                        {cloudJob ? <>
+                            {cloudJob.message && <p role="status" className="mb-3 text-sm text-amber-600 dark:text-amber-400">{cloudJob.message}</p>}
+                            <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
+                                {cloudJob.assets.map((file, index) => <div key={file.id} className="overflow-hidden rounded-lg border border-border bg-background">
+                                    {file.thumbUrl && <img src={file.thumbUrl} alt={`生成结果 ${index + 1}`} className="aspect-square w-full object-contain" loading="lazy" decoding="async" />}
+                                    <div className="space-y-1 p-2 text-xs text-muted-foreground"><p>{formatBytes(file.bytes)} · 已存入云图库</p>
+                                        <CloudFileActions file={file} />
+                                        <div className="flex flex-wrap gap-1"><Button size="small" type="text" onClick={() => void reuseCloudImage(file, index, false)}>加入参考图</Button><Button size="small" type="text" onClick={() => void reuseCloudImage(file, index, true)}>存为画布素材</Button></div>
+                                    </div>
+                                </div>)}
+                            </div>
+                            <Link to="/jobs" className="mt-3 inline-flex text-sm text-muted-foreground hover:text-foreground">查看我的生成记录</Link>
+                        </> : results.length ? (
                             <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
                                 {results.map((result, index) =>
                                     result.status === "success" && result.image ? (
@@ -728,7 +786,7 @@ function GenerationSettings({ config, model, updateConfig, openConfigDialog }: {
                 <ModelPicker config={config} value={model} onChange={(value) => updateConfig("imageModel", value)} capability="image" fullWidth onMissingConfig={() => openConfigDialog(false)} />
             </label>
             <div className="col-span-2">
-                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={10} />
+                <ImageSettingsPanel config={config} onConfigChange={(key, value) => updateConfig(key, value)} theme={theme} showTitle={false} className="space-y-4" maxCount={4} />
             </div>
         </>
     );

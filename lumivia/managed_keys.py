@@ -11,15 +11,15 @@ PREFIX = "sk-lcv1-"
 NAME = "乐米画布 · 平台生图"
 
 
-def managed_secret(user_id, group):
+def managed_secret(user_id, group, kind="image"):
     seed = (Path(os.environ["CREDENTIALS_DIRECTORY"]) / "canvas-key-seed").read_bytes()
     if len(seed) != 32:
         raise RuntimeError("Invalid canvas credential seed")
-    return PREFIX + hmac.digest(seed, f"image:{user_id}:{group}".encode(), "sha256").hex()
+    return PREFIX + hmac.digest(seed, f"{kind}:{user_id}:{group}".encode(), "sha256").hex()
 
 
-async def managed_image_key(req, api, user_id, group):
-    secret = managed_secret(user_id, group)
+async def managed_image_key(req, api, user_id, group, kind="image"):
+    secret = managed_secret(user_id, group, kind)
     async with req.app["key_lock"]:
         # Only the public prefix enters upstream URLs and access logs.
         page = 1
@@ -31,7 +31,7 @@ async def managed_image_key(req, api, user_id, group):
             if not batch["items"] or page * batch["page_size"] >= batch["total"]:
                 break
             page += 1
-        item = await api("keys", {"name": NAME, "group_id": group, "custom_key": secret})
+        item = await api("keys", {"name": NAME if kind == "image" else "乐米画布 · 平台视频", "group_id": group, "custom_key": secret})
         return checked(item, user_id, group, secret)
 
 

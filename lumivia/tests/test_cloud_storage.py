@@ -120,12 +120,11 @@ class StorageTest(unittest.IsolatedAsyncioTestCase):
                 while not storage.pending:
                     await asyncio.sleep(0.01)
             self.assertEqual((await self.upload("member")).status, 413)
-            storage.total_limit = len(PNG)
-            self.assertEqual((await self.upload("other")).status, 507)
-            storage.total_limit = GIB
+            with patch.object(type(storage), "total_limit", new=property(lambda _: len(PNG))):
+                self.assertEqual((await self.upload("other")).status, 507)
             storage.reserve = 10 ** 20
             self.assertEqual((await self.upload("other")).status, 507)
         finally:
             release.set()
             self.assertEqual((await inflight).status, 201)
-        self.assertEqual(len(list((self.path / "images").iterdir())), 1)
+        self.assertEqual(len(list((self.path / "media").iterdir())), 1)

@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { App, Button, Empty, Input, InputNumber, Modal, Progress, Segmented, Space, Spin, Table, Tag } from "antd";
-import { Download, Eye, Trash2, Upload } from "lucide-react";
+import { App, Button, Empty, Input, InputNumber, Modal, Progress, Space, Spin, Table, Tag } from "antd";
+import { Trash2, Upload, Video } from "lucide-react";
+import { Link } from "react-router-dom";
+import { CloudFileActions, cloudFileName } from "@/components/cloud-file-actions";
 import { lumiviaImageAccount, useLumiviaAccount } from "@/components/layout/lumivia-account";
 import { cloudStorage, GIB, type CanvasUser, type CloudAdmin, type CloudFile, type CloudFiles } from "@/services/api/cloud-storage";
 import { formatBytes as displayBytes } from "@/lib/image-utils";
@@ -10,18 +12,12 @@ const formatBytes = (bytes: number) => displayBytes(bytes) || "0 B";
 export default function StoragePage() {
     const { account, syncing } = useLumiviaAccount();
     return <div className="h-full overflow-y-auto"><div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
-        <h1 className="text-2xl font-semibold">云图库</h1>
-        <p className="mt-2 mb-6 text-sm text-muted-foreground">在生图结果中选择「存云端」，也可以在这里上传。打开列表只读取文件信息，预览或下载时才加载原图。</p>
-        {account ? <Library key={account.id} admin={account.isAdmin === true} /> : syncing ? <Spin /> : <Empty description="请先登录乐米主站，再打开画布" />}
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h1 className="text-2xl font-semibold">云图库</h1>
+            <div className="flex items-center gap-3"><Link className="text-sm underline" to="/jobs">生成中心</Link>{account?.isAdmin && <Link className="text-sm underline" to="/admin/canvas">运营后台</Link>}</div>
+        </div>
+        <p className="mb-6 text-sm text-muted-foreground">管理当前账号的云端图片和视频。列表只加载小图，原文件按需读取。</p>
+        {account ? <MyImages key={account.id} /> : syncing ? <Spin /> : <Empty description="请先登录乐米主站，再打开画布" />}
     </div></div>;
-}
-
-function Library({ admin }: { admin: boolean }) {
-    const [tab, setTab] = useState("images");
-    return <>
-        {admin && <Segmented className="mb-5" value={tab} onChange={setTab} options={[{ label: "我的图片", value: "images" }, { label: "存储管理", value: "admin" }]} />}
-        {admin && tab === "admin" ? <AdminQuota /> : <MyImages />}
-    </>;
 }
 
 function useRequestScope() {
@@ -52,7 +48,6 @@ function MyImages() {
     const [result, setResult] = useState<CloudFiles>();
     const [loading, setLoading] = useState(true);
     const [working, setWorking] = useState<string>();
-    const [preview, setPreview] = useState<string>();
     useEffect(() => {
         const controller = new AbortController();
         setLoading(true);
@@ -61,31 +56,12 @@ function MyImages() {
         }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
         return () => controller.abort();
     }, [page, version, message]);
-    useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
-    const open = async (item: CloudFile, download: boolean) => {
-        const active = signal();
-        setWorking(item.id);
-        try {
-            const blob = await cloudStorage.read(item.id, active);
-            if (active.aborted) return;
-            if (download) {
-                const url = URL.createObjectURL(blob);
-                const link = Object.assign(document.createElement("a"), { href: url, download: fileName(item), hidden: true });
-                document.body.append(link);
-                try { link.click(); } finally {
-                    link.remove();
-                    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-                }
-            } else setPreview(URL.createObjectURL(blob));
-        } catch (error) { if (!active.aborted) message.error((error as Error).message); }
-        finally { setWorking(undefined); }
-    };
     return <>
         <div className="mb-5 rounded-xl border border-border p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
-                <div><h2 className="font-medium">我的云存储</h2><p className="text-sm text-muted-foreground">{result ? `已使用 ${formatBytes(result.used)} / ${formatBytes(result.quota)}` : "正在读取用量"}</p></div>
-                <Button icon={<Upload size={16} />} loading={uploading} disabled={!result || result.used >= result.quota} onClick={() => uploadInput.current?.click()}>上传图片</Button>
-                <input ref={uploadInput} hidden type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif" onChange={async (event) => {
+                <div><h2 className="font-medium">我的云存储</h2><p className="text-sm text-muted-foreground">{result ? `已使用 ${formatBytes(result.used)} / ${formatBytes(result.quota)}${result.reserved ? ` · 任务预留 ${formatBytes(result.reserved)}` : ""}` : "正在读取用量"}</p></div>
+                <Button icon={<Upload size={16} />} loading={uploading} disabled={!result || result.used + (result.reserved || 0) >= result.quota} onClick={() => uploadInput.current?.click()}>上传素材</Button>
+                <input ref={uploadInput} hidden type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif,video/mp4,video/webm" onChange={async (event) => {
                     const file = event.currentTarget.files?.[0];
                     event.currentTarget.value = "";
                     if (!file) return;
@@ -99,39 +75,35 @@ function MyImages() {
                     finally { setUploading(false); }
                 }} />
             </div>
+            {result && <p className="mt-2 text-xs text-muted-foreground">{result.retentionDays ? `新素材保存 ${result.retentionDays} 天` : "新素材不自动过期"} · 单图 {result.imageMiB ?? 32} MiB · 单视频 {result.videoMiB ?? 128} MiB</p>}
             {result && <Progress className="mt-3" percent={result.quota ? Math.min(100, Math.round(result.used / result.quota * 100)) : 100} status={result.used >= result.quota ? "exception" : "normal"} />}
         </div>
-        <Table rowKey="id" size="small" pagination={false} loading={loading} dataSource={result?.items ?? []} scroll={{ x: 560 }} columns={[
-            { title: "文件", render: (_: unknown, item: CloudFile) => fileName(item) },
+        <Table rowKey="id" size="small" pagination={false} loading={loading} dataSource={result?.items ?? []} scroll={{ x: 670 }} columns={[
+            { title: "文件", render: (_: unknown, item: CloudFile) => <span className="flex items-center gap-2 whitespace-nowrap">
+                {item.thumbUrl ? <img src={item.thumbUrl} alt="" width={40} height={40} className="size-10 rounded object-cover" loading="lazy" decoding="async" /> : item.mime.startsWith("video/") ? <Video size={18} /> : null}
+                {cloudFileName(item)}</span> },
             { title: "大小", dataIndex: "bytes", render: formatBytes },
-            { title: "保存时间", dataIndex: "created", render: (value: number) => new Date(value).toLocaleString() },
-            { title: "操作", render: (_: unknown, item: CloudFile) => <Space>
-                <Button size="small" icon={<Eye size={14} />} loading={working === item.id} disabled={!!working} onClick={() => void open(item, false)}>预览</Button>
-                <Button size="small" icon={<Download size={14} />} disabled={!!working} onClick={() => void open(item, true)}>下载</Button>
-                <Button size="small" danger icon={<Trash2 size={14} />} onClick={() => {
-                    const active = signal();
-                    modal.confirm({ title: "移除此云端图片？", content: "移除后会释放已占用的云端额度。", okText: "删除", cancelText: "取消", okButtonProps: { danger: true }, onOk: async () => {
-                        try {
-                            await cloudStorage.delete(item.id, active);
-                            if (page > 1 && result?.items.length === 1) setPage(page - 1);
-                            else setVersion((value) => value + 1);
-                        } catch (error) { if (!active.aborted) { message.error((error as Error).message); throw error; } }
-                    } });
-                }}>删除</Button>
+            { title: "位置", render: (_: unknown, item: CloudFile) => item.location === "cos" ? "对象存储" : "本机" },
+            { title: "到期", render: (_: unknown, item: CloudFile) => item.expires ? new Date(item.expires).toLocaleDateString() : "长期" },
+            { title: "操作", render: (_: unknown, item: CloudFile) => <Space size={2}>
+                <CloudFileActions file={item} />
+                <Button type="text" danger size="small" aria-label="删除" title="删除" icon={<Trash2 size={15} />} loading={working === item.id} onClick={() => modal.confirm({
+                    title: "删除这份云端素材？", content: "删除后，生成记录里也不能再打开这份云端文件。", okText: "删除", cancelText: "取消", okButtonProps: { danger: true },
+                    async onOk() {
+                        const active = signal();
+                        setWorking(item.id);
+                        try { await cloudStorage.delete(item.id, active); message.success("已删除"); }
+                        catch (error) { if (!active.aborted) message.error((error as Error).message); }
+                        finally { setWorking(undefined); setVersion((value) => value + 1); }
+                    },
+                })} />
             </Space> },
         ]} />
         <Pager page={page} more={result?.more && !loading} change={setPage} />
-        <Modal open={!!preview} title="原图预览" footer={null} onCancel={() => setPreview(undefined)} width={900}>
-            {preview && <img src={preview} alt="云端原图" className="mx-auto max-h-[70dvh] max-w-full object-contain" />}
-        </Modal>
     </>;
 }
 
-function fileName(item: CloudFile) {
-    return `lumivia-${item.id.slice(0, 10)}.${item.mime === "image/jpeg" ? "jpg" : item.mime.split("/")[1]}`;
-}
-
-function AdminQuota() {
+export function AdminQuota() {
     const { message } = App.useApp();
     const signal = useRequestScope();
     const [page, setPage] = useState(1);
@@ -178,11 +150,11 @@ function AdminQuota() {
             { title: "操作", render: (_: unknown, user: CanvasUser) => <Button size="small" onClick={() => { setEditing(user); setQuota((user.quota ?? result!.defaultQuota) / GIB); }}>调整额度</Button> },
         ]} />
         <Pager page={page} more={result?.more && !loading} change={setPage} />
-        <p className="mt-4 text-xs text-muted-foreground">列表包含已进入过画布的主站账号。降低额度会保留现有图片，超额时暂停新增。</p>
+        <p className="mt-4 text-xs text-muted-foreground">列表包含已进入过画布的主站账号。降低额度会保留现有素材，超额时暂停新增。</p>
         <Modal open={editing !== null} title={editing === "default" ? "调整全站默认额度" : "调整用户存储额度"} okText="保存" cancelText="取消" confirmLoading={saving} okButtonProps={{ disabled: quota === null || quota < 0 || quota > 1024 }} onOk={() => void save()} onCancel={() => { if (!saving) setEditing(null); }}>
             <Space direction="vertical" className="py-2">
                 <InputNumber aria-label="存储额度（GiB）" value={quota} onChange={setQuota} min={0} max={1024} step={0.25} addonAfter="GiB" />
-                <span className="text-xs text-muted-foreground">设为 0 后禁止新增图片。</span>
+                <span className="text-xs text-muted-foreground">设为 0 后禁止新增云端素材。</span>
                 {editing && editing !== "default" && <Button size="small" disabled={saving} onClick={() => void save(true)}>恢复全站默认额度</Button>}
             </Space>
         </Modal>

@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 LoadCredential=canvas-key-seed:/etc/lumivia-canvas/key-seed
-ExecStart=/usr/bin/python3 /opt/infinite-canvas/lumivia/bridge.py
+ExecStart=@CANVAS_RELEASE@/venv/bin/python @CANVAS_RELEASE@/lumivia/bridge.py
 Restart=on-failure
 DynamicUser=yes
 StateDirectory=lumivia-canvas

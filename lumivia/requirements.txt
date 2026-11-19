@@ -1,0 +1,5 @@
+aiohttp==3.14.5
+Pillow==13.0.0
+ijson==3.6.0
+cryptography==49.0.0
+cos-python-sdk-v5==1.9.45
