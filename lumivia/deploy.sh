@@ -45,7 +45,7 @@ PY
 nginx -t && systemctl reload nginx
 ready=0
 for attempt in {1..12}; do
-  if curl -fsS --resolve canvas.lumivia.cn:443:127.0.0.1 https://canvas.lumivia.cn/lumivia/session | grep -qx null && curl -fsS --resolve api.lumivia.cn:443:127.0.0.1 https://api.lumivia.cn/canvas-connect/ | grep -q '连接无限画布'; then ready=1; break; fi
+  if curl -fsS --resolve canvas.lumivia.cn:443:127.0.0.1 https://canvas.lumivia.cn/lumivia/session | grep -qx null && curl -fsS --resolve api.lumivia.cn:443:127.0.0.1 https://api.lumivia.cn/canvas-connect/ | grep -q '连接乐米画布'; then ready=1; break; fi
   sleep 1
 done
 test "$ready" -eq 1

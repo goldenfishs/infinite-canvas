@@ -1,6 +1,6 @@
 export default {
     meta: {
-        title: "Infinite Canvas",
+        title: "Lumivia Canvas",
         description: "An infinite canvas creation tool",
     },
     theme: { toggle: "Toggle theme" },
@@ -215,9 +215,9 @@ export default {
         empty: "No video generated yet",
     },
     canvas: {
-        defaultTitle: "Infinite Canvas {{count}}",
+        defaultTitle: "Lumivia Canvas {{count}}",
         library: "Canvas library",
-        title: "Infinite Canvas",
+        title: "Lumivia Canvas",
         imported: "Imported {{count}} canvases",
         importFailed: "Import failed. Select a valid canvas package.",
         opening: "Opening canvas...",
@@ -261,7 +261,7 @@ export default {
             select: "Select {{name}}", stats: "{{nodes}} nodes · {{connections}} connections", updated: "Updated {{date}}", saveName: "Save name", cancelRename: "Cancel rename", export: "Export", rename: "Rename", delete: "Delete",
             deleteTitle: "Delete canvases?", deleteDescription: "This will delete {{count}} canvases along with their nodes and connections.",
         },
-        export: { defaultProjectName: "Infinite Canvas", defaultNodesName: "Canvas elements", item: "Element" },
+        export: { defaultProjectName: "Lumivia Canvas", defaultNodesName: "Canvas elements", item: "Element" },
         createMenu: {
             fromNode: "Generate from this node", close: "Close", text: "Generate text", textDescription: "Scripts, ad copy, and brand content", image: "Generate image", video: "Generate video", audio: "Audio reference", config: "Configuration node", configDescription: "Model, size, count, and input order", select: "Select a node",
         },
@@ -346,7 +346,7 @@ export default {
     },
     home: {
         promptError: "Failed to load prompts",
-        description: "Generate, connect, and reshape <content>images, text, and graphics</content> in <canvas>Infinite Canvas</canvas>, turning one-off generations into a continuous creative process.",
+        description: "Generate, connect, and reshape <content>images, text, and graphics</content> in <canvas>Lumivia Canvas</canvas>, turning one-off generations into a continuous creative process.",
         start: "Get started",
         openCanvas: "Open canvas",
         showcaseTitle: "Keep every great result",
@@ -395,7 +395,7 @@ export default {
         },
         localStorage: {
             title: "IndexedDB storage usage",
-            description: "View browser data saved by Infinite Canvas, grouped by object store.",
+            description: "View browser data saved by Lumivia Canvas, grouped by object store.",
             indexedDbUsage: "IndexedDB usage",
             siteUsage: "Total site usage",
             quota: "Available quota",
@@ -404,7 +404,7 @@ export default {
             quotaHint: "Allocated dynamically by the browser",
             quotaUnavailable: "Quota estimation is unavailable in this browser",
             quotaProgress: "Site quota usage",
-            mainDatabase: "Infinite Canvas data",
+            mainDatabase: "Lumivia Canvas data",
             records: "{{count}} records",
             refresh: "Refresh usage",
             readFailed: "Failed to read local storage",

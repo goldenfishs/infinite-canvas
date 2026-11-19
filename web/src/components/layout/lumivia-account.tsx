@@ -24,7 +24,7 @@ export function LumiviaAccount(){
     useEffect(()=>{let live=true; const sync=async()=>{try{const r=await fetch('/lumivia/session',{cache:'no-store'});if(!r.ok)throw Error();const data:Account|null=await r.json();if(live){applyAccount(data);setAccount(data);setError('')}}catch{if(live)setError('暂时无法连接主站')}};void sync();window.addEventListener('focus',sync);return()=>{live=false;window.removeEventListener('focus',sync)}},[]);
     const prices=Object.entries(account?.prices || {}).map(([k,v])=>`${k.toUpperCase()} ¥${v}`).join(' · ');
     return <div className="flex min-h-8 shrink-0 flex-wrap items-center justify-between gap-x-4 border-b border-stone-200 bg-background px-4 py-1 text-xs dark:border-stone-800" aria-label="乐米账号">
-        <span className="truncate" title={account?.email}>{account ? `${account.email} · ${account.group}` : '乐米无限画布'} {error && <span role="status">{error}</span>}</span>
+        <span className="truncate" title={account?.email}>{account ? `${account.email} · ${account.group}` : '乐米画布'} {error && <span role="status">{error}</span>}</span>
         <span className="flex items-center gap-3">{account ? <><span>{prices ? `${prices} / 张` : '按主站分组计费'}</span><button type="button" aria-label="退出画布账号" title="退出画布账号" onClick={async()=>{try{const r=await fetch('/lumivia/logout',{method:'POST'});if(!r.ok)throw Error();applyAccount(null);setAccount(null)}catch{setError('退出失败，请重试')}}}><LogOut size={15}/></button></> : <a className="inline-flex items-center gap-1 font-medium" target={window.top===window.self?'_self':'_blank'} rel="noopener" href="/lumivia/start"><LogIn size={15}/>用乐米账号登录</a>}</span>
     </div>;
 }
