@@ -186,7 +186,10 @@ class Jobs:
                 payload["background"] = spec["background"]
         else:
             seconds, ratio, resolution = spec.get("seconds"), spec.get("ratio"), spec.get("resolution")
-            if type(seconds) is not int or not 4 <= seconds <= settings["videoSeconds"] or ratio not in ("16:9", "9:16", "1:1") or resolution not in ("480p", "720p", "1080p"):
+            options = policy.video_options(model, protocol)
+            if (type(seconds) is not int or not 4 <= seconds <= settings["videoSeconds"]
+                    or (options["durations"] and seconds not in options["durations"])
+                    or ratio not in ("16:9", "9:16", "1:1") or resolution not in options["resolutions"]):
                 raise CanvasError(400, "视频时长、比例或分辨率不在后台允许范围内")
             payload.update(seconds=seconds, ratio=ratio, resolution=resolution)
         if self.memory_pressure():

@@ -100,6 +100,11 @@ function JobForm({ account, kind, onQueued }: { account: Account; kind: JobKind;
     const attempted = useRef<{ signature: string; file?: File; id: string }>(null);
     const models = kind === "image" ? account.models : account.videoModels || [];
     const model = Form.useWatch("model", form);
+    const videoOptions = account.videoOptions?.[model || models[0]];
+    const videoDefault = account.videoOptions?.[models[0]];
+    const defaultResolution = videoDefault?.resolutions.includes("720p") ? "720p" : videoDefault?.resolutions[0] ?? "720p";
+    const durations = videoOptions?.durations || [];
+    const resolutions = videoOptions?.resolutions || ["480p", "720p", "1080p"];
     const size = Form.useWatch("size", form);
     const count = Form.useWatch("count", form) ?? 1;
     const price = size === "1024x1024" ? account.prices["1k"] : size === "2048x2048" ? account.prices["2k"] : size === "3840x2160" ? account.prices["4k"] : undefined;
@@ -128,8 +133,15 @@ function JobForm({ account, kind, onQueued }: { account: Account; kind: JobKind;
         <p className="mb-4 text-xs text-muted-foreground">{kind === "image" ? account.group : account.videoGroups?.[model || models[0]] || "视频渠道"} · 费用按当前账号的主站分组结算。</p>
         {!models.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={kind === "video" ? "视频功能未开放，或账号没有视频分组权限" : "当前账号没有可用的图片模型"}>
             <Button onClick={() => void useLumiviaAccount.getState().sync()}>重新同步账号</Button>{kind === "video" && <Link to="/video/local" className="ml-3 text-sm underline">本机视频历史</Link>}
-        </Empty> : <Form form={form} layout="vertical" initialValues={{ model: models[0], size: "1024x1024", quality: "auto", count: 1, seconds: Math.min(6, account.videoSeconds || 12), ratio: "16:9", resolution: "720p" }} onFinish={submit} disabled={sending}>
-            <Form.Item name="model" label="模型" rules={[{ required: true }]}><Select options={opts(models)} showSearch /></Form.Item>
+        </Empty> : <Form form={form} layout="vertical" initialValues={{ model: models[0], size: "1024x1024", quality: "auto", count: 1, seconds: videoDefault?.durations[0] ?? Math.min(6, account.videoSeconds || 12), ratio: "16:9", resolution: defaultResolution }} onFinish={submit} disabled={sending}>
+            <Form.Item name="model" label="模型" rules={[{ required: true }]}><Select options={opts(models)} showSearch onChange={(value: string) => {
+                if (kind !== "video") return;
+                const selected = account.videoOptions?.[value];
+                const currentResolution = form.getFieldValue("resolution");
+                const currentSeconds = form.getFieldValue("seconds");
+                if (selected?.resolutions.length && !selected.resolutions.includes(currentResolution)) form.setFieldValue("resolution", selected.resolutions[0]);
+                if (selected?.durations.length && !selected.durations.includes(currentSeconds)) form.setFieldValue("seconds", selected.durations[0]);
+            }} /></Form.Item>
             <Form.Item name="prompt" label="提示词" rules={[{ required: true, whitespace: true, max: 4000, message: "请填写提示词，最多 4000 字" }]}><Input.TextArea rows={5} maxLength={4000} showCount placeholder={kind === "image" ? "描述画面、光线和风格" : "描述场景、主体动作和镜头"} /></Form.Item>
             <div className="grid grid-cols-2 gap-x-3">
                 {kind === "image" ? <>
@@ -137,9 +149,9 @@ function JobForm({ account, kind, onQueued }: { account: Account; kind: JobKind;
                     <Form.Item name="quality" label="画质"><Select options={opts(["auto", "low", "medium", "high"])} /></Form.Item>
                     <Form.Item name="count" label="张数" rules={[{ required: true }]}><InputNumber min={1} max={4} precision={0} className="!w-full" /></Form.Item>
                 </> : <>
-                    <Form.Item name="resolution" label="分辨率"><Select options={opts(["480p", "720p", "1080p"])} /></Form.Item>
+                    <Form.Item name="resolution" label="分辨率" rules={[{ required: true }]}><Select options={opts(resolutions)} /></Form.Item>
                     <Form.Item name="ratio" label="画面比例"><Select options={opts(["16:9", "9:16", "1:1"])} /></Form.Item>
-                    <Form.Item name="seconds" label="时长（秒）" rules={[{ required: true }]}><InputNumber min={4} max={account.videoSeconds || 12} precision={0} className="!w-full" /></Form.Item>
+                    <Form.Item name="seconds" label="时长（秒）" rules={[{ required: true }]}>{durations.length ? <Select options={durations.map((value) => ({ value }))} /> : <InputNumber min={4} max={account.videoSeconds || 12} precision={0} className="!w-full" />}</Form.Item>
                 </>}
             </div>
             <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><input type="file" accept={fileAccept} hidden ref={input} onChange={(e) => { setReference(e.currentTarget.files?.[0]); e.currentTarget.value = ""; }} />

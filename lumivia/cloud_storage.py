@@ -367,7 +367,7 @@ class CloudStorage:
                     await asyncio.to_thread(candidate.verify)
                 except Exception as exc:
                     LOG.warning("COS verification failed kind=%s", type(exc).__name__)
-                    raise CanvasError(502, "COS 测试失败：请检查地域、桶名和专用密钥的上传、读取及删除权限") from None
+                    raise CanvasError(502, "COS 测试失败。请检查地域、桶名和专用密钥的上传、签名下载与删除权限") from None
             # Recheck after network I/O to avoid overwriting settings saved by another admin.
             self.policy.validate(data.get("revision"), {})
             with self.db:

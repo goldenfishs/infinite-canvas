@@ -6,7 +6,8 @@ import { setLumiviaChannel, type LumiviaChatChannel } from "@/stores/use-config-
 const MAIN_ORIGIN = "https://api.lumivia.cn";
 const text = (key: string) => i18n.t(`config.lumivia.${key}`);
 
-export type Account = { id: number; email: string; isAdmin?: boolean; group: string; prices: Record<string, number>; models: string[]; imageWarning?: string; chatChannels?: LumiviaChatChannel[]; videoModels?: string[]; videoGroups?: Record<string, string>; videoSeconds?: number };
+export type VideoOptions = { resolutions: string[]; durations: number[] };
+export type Account = { id: number; email: string; isAdmin?: boolean; group: string; prices: Record<string, number>; models: string[]; imageWarning?: string; chatChannels?: LumiviaChatChannel[]; videoModels?: string[]; videoGroups?: Record<string, string>; videoOptions?: Record<string, VideoOptions>; videoSeconds?: number };
 type GrantTarget = { action: "storage" | "storage-admin" } | { action: "chat"; channelId: string; model: string } | { action: "job-image" | "job-video"; model: string };
 type Request = { action: "account" } | (GrantTarget & { challenge: string; accountId: number });
 type Reply = { status: number; account?: Account; grant?: string; error?: string };

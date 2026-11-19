@@ -66,6 +66,8 @@ class BusinessFlows(unittest.IsolatedAsyncioTestCase):
         upstream.router.add_post("/v1/videos", self.submit_compat_video)
         upstream.router.add_get("/v1/videos/compat-ref", lambda r: web.json_response({"id": "compat-ref", "status": "completed"}))
         upstream.router.add_get("/v1/videos/compat-ref/content", lambda r: web.Response(body=MP4, content_type="video/mp4"))
+        upstream.router.add_get("/v1/videos/minimax-ref", lambda r: web.json_response({
+            "id": "minimax-ref", "status": "completed", "metadata": {"url": "https://assets.test/video.mp4"}}))
         self.upstream = TestServer(upstream)
         await self.upstream.start_server()
         self.addAsyncCleanup(self.upstream.close)
@@ -150,6 +152,11 @@ class BusinessFlows(unittest.IsolatedAsyncioTestCase):
         return web.json_response({"id": "video-ref", "status": "succeeded", "content": {"video_url": "https://assets.test/video.mp4"}})
 
     async def submit_compat_video(self, req):
+        if req.content_type == "application/json":
+            self.calls.append(("post-minimax", req.headers["Authorization"]))
+            body = await req.json()
+            assert body == {"seconds": "10", "size": "1366x768", "model": VIDEO, "prompt": "motion"}, body
+            return web.json_response({"task_id": "minimax-ref"})
         assert req.content_type == "multipart/form-data"
         body = await req.post()
         assert body["seconds"] == "4" and body["model"] == VIDEO
@@ -305,6 +312,19 @@ class BusinessFlows(unittest.IsolatedAsyncioTestCase):
                 range_response = await self.client.get(link["url"], headers={"Range": "bytes=0-7"})
                 self.assertEqual(range_response.status, 206)
                 self.assertEqual(await range_response.read(), MP4[:8])
+        await self.policy({"videoGroup": 0, "videoModels": [], "extraVideoRoutes": [
+            {"model": VIDEO, "group": 99, "protocol": "minimax", "resolutions": ["768p"], "durations": [10, 12]}]})
+        _, account, _ = await self.grant("member", "account")
+        self.assertEqual(account["account"]["videoOptions"][VIDEO], {"resolutions": ["768p"], "durations": [10, 12]})
+        payload = {"id": uuid.uuid4().hex, "model": VIDEO, "prompt": "motion", "seconds": 10, "ratio": "16:9", "resolution": "768p"}
+        rejected = await self.post("member", "jobs/video", {**payload, "seconds": 6}, model=VIDEO)
+        self.assertEqual(rejected.status, 400)
+        with patch("media_gateway.download_media", mock_media):
+            accepted = await self.post("member", "jobs/video", payload, model=VIDEO)
+            self.assertEqual(accepted.status, 202, await accepted.text())
+            row = await self.wait_state(payload["id"], ("completed", "review", "failed"))
+            self.assertEqual(row["status"], "completed", row["message"])
+            self.assertEqual(self.app["jobs"].summary(row)["assets"][0]["mime"], "video/mp4")
         self.assertTrue(all(c[-1] == "Bearer " + managed_secret(7, 99, "video") for c in self.calls))
 
     async def test_cos_rotation_local_compat_and_expiry(self):

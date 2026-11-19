@@ -16,7 +16,7 @@ from canvas_policy import CanvasError, MIB
 REMOTE_ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,191}\Z")
 SEEDANCE = "/api/v3/contents/generations/tasks"
 ID_FIELDS = ("id", "task_id", "data.id", "data.task_id")
-VIDEO_URL = ("content.video_url", "video.url", "video_url", "result_url", "url", "data.content.video_url", "data.video.url", "data.video_url", "data.result_url")
+VIDEO_URL = ("content.video_url", "video.url", "metadata.url", "video_url", "result_url", "url", "data.content.video_url", "data.video.url", "data.video_url", "data.result_url")
 SUCCESS = {"completed", "succeeded", "success", "done"}
 FAILED = {"failed", "error", "cancelled", "canceled", "expired", "failure"}
 
@@ -143,11 +143,18 @@ def build_arguments(row, spec, stage):
         return SEEDANCE, {"json": payload}, handles
     height = int(spec["resolution"][:-1])
     wide = round(height * 16 / 9 / 2) * 2
-    # Compatible /videos task gateways commonly accept these four fields as multipart.
     dims = {"16:9": (wide, height), "9:16": (height, wide), "1:1": (height, height)}
     w, h = dims[spec["ratio"]]
+    payload = {"model": spec["model"], "prompt": spec["prompt"], "seconds": str(spec["seconds"]), "size": f"{w}x{h}"}
+    if row["protocol"] == "minimax":
+        if references:
+            reference, ref = references[0]
+            url = f'data:{ref["mime"]};base64,' + base64.b64encode(reference.read_bytes()).decode()
+            payload["metadata"] = {"content": [{"type": "image_url", "image_url": {"url": url}}]}
+        return "/v1/videos", {"json": payload}, handles
+    # Keep the multipart format of existing compatible channels.
     form = aiohttp.MultipartWriter("form-data")
-    for key, value in {"model": spec["model"], "prompt": spec["prompt"], "seconds": str(spec["seconds"]), "size": f"{w}x{h}"}.items():
+    for key, value in payload.items():
         form.append(value).set_content_disposition("form-data", name=key)
     if references:
         reference, ref = references[0]
@@ -266,7 +273,7 @@ class MediaGateway:
         # Only the constructed authenticated path is eligible for a request with the managed key.
         if url and urlsplit(url).path != status_route + "/content":
             return await download_media(self.public, url, allowed, path, row["cap"])
-        if row["protocol"] == "openai":
+        if row["protocol"] in ("openai", "minimax"):
             async with self.http.get(self.base + status_route + "/content", headers=self.headers(row, key),
                                      allow_redirects=False, timeout=aiohttp.ClientTimeout(total=160)) as response:
                 if response.status == 200:

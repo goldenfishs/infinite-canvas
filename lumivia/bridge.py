@@ -362,6 +362,7 @@ async def approve(req):
                 "imageWarning": image_warning,
                 "videoModels": list(videos),
                 "videoGroups": videos,
+                "videoOptions": {m: policy.video_options(m, protocol) for m, (_, protocol) in policy.video_routes().items() if m in videos},
                 "videoSeconds": policy.value["videoSeconds"],
             }
         }

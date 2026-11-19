@@ -8,6 +8,8 @@ MIB = 1024 ** 2
 GIB = 1024 ** 3
 MODEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}\Z")
 HOST = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\.[a-z]{2,63}\Z")
+VIDEO_RESOLUTIONS = ("480p", "720p", "768p", "1080p", "1440p")
+VIDEO_PROTOCOLS = ("seedance", "openai", "minimax")
 DEFAULT = {
     "backend": "local", "retentionDays": 0, "totalLimitMiB": 8 * 1024, "diskReserveMiB": 4 * 1024,
     "imageMiB": 32, "videoMiB": 128, "workers": 1, "perUser": 2, "queueSize": 30, "memoryGuardMiB": 384,
@@ -23,7 +25,7 @@ NUMBERS = {
     "imageGroup": (0, 2 ** 53 - 1), "videoGroup": (0, 2 ** 53 - 1), "videoSeconds": (4, 15),
 }
 CHOICES = {
-    "backend": ("local", "cos"), "imageMode": ("auto", "sync", "native"), "videoProtocol": ("seedance", "openai"),
+    "backend": ("local", "cos"), "imageMode": ("auto", "sync", "native"), "videoProtocol": VIDEO_PROTOCOLS,
 }
 
 
@@ -77,12 +79,18 @@ class CanvasPolicy:
             raise CanvasError(400, "额外视频渠道最多 12 条")
         models = set(result["videoModels"])
         for route in routes:
-            if not isinstance(route, dict) or set(route) != {"model", "group", "protocol"}:
+            required = {"model", "group", "protocol"}
+            if not isinstance(route, dict) or not required <= route.keys() <= required | {"resolutions", "durations"}:
                 raise CanvasError(400, "额外视频渠道格式无效")
             model, group, protocol = route["model"], route["group"], route["protocol"]
             if (not isinstance(model, str) or not MODEL.fullmatch(model) or model in models or type(group) is not int
                     or not 0 < group < 2 ** 53 or protocol not in CHOICES["videoProtocol"]):
                 raise CanvasError(400, "额外视频渠道需要不重复的模型名、有效分组和协议")
+            resolutions, durations = route.get("resolutions", []), route.get("durations", [])
+            if not isinstance(resolutions, list) or len(resolutions) > len(VIDEO_RESOLUTIONS) or any(r not in VIDEO_RESOLUTIONS for r in resolutions):
+                raise CanvasError(400, "视频分辨率无效")
+            if not isinstance(durations, list) or len(durations) > 12 or any(type(d) is not int or not 4 <= d <= result["videoSeconds"] for d in durations):
+                raise CanvasError(400, "可选视频时长必须在 4 秒与全站上限之间")
             models.add(model)
         if bool(result["videoGroup"]) != bool(result["videoModels"]):
             raise CanvasError(400, "默认视频渠道的分组和模型必须同时配置")
@@ -95,6 +103,12 @@ class CanvasPolicy:
             return {}
         primary = {model: (self.value["videoGroup"], self.value["videoProtocol"]) for model in self.value["videoModels"]}
         return {**primary, **{r["model"]: (r["group"], r["protocol"]) for r in self.value["extraVideoRoutes"]}}
+
+    def video_options(self, model, protocol):
+        route = next((r for r in self.value["extraVideoRoutes"] if r["model"] == model), {})
+        resolutions = route.get("resolutions") or (["768p"] if protocol == "minimax" else ["480p", "720p", "1080p"])
+        duration = route.get("durations") or []
+        return {"resolutions": list(dict.fromkeys(resolutions)), "durations": sorted(set(duration))}
 
     def permits(self, kind, model):
         return self.value[kind + "Enabled"] and (not self.value[kind + "Models"] or model in self.value[kind + "Models"])

@@ -6,13 +6,14 @@ export type CloudFile = { id: string; mime: string; bytes: number; created: numb
 export type CloudFiles = { items: CloudFile[]; more: boolean; used: number; quota: number; reserved?: number; retentionDays?: number; imageMiB?: number; videoMiB?: number };
 export type CanvasUser = { id: number; email: string; quota: number | null; used: number };
 export type CloudAdmin = { items: CanvasUser[]; more: boolean; defaultQuota: number; totalUsed: number; totalLimit: number; diskFree: number; reservedFree: number };
+export type CanvasVideoProtocol = "seedance" | "openai" | "minimax";
 export type CanvasPolicy = {
     backend: "local" | "cos"; retentionDays: number; totalLimitMiB: number; diskReserveMiB: number;
     imageMiB: number; videoMiB: number; workers: number; perUser: number; queueSize: number; memoryGuardMiB: number;
     imageEnabled: boolean; imageGroup: number; imageMode: "auto" | "sync" | "native"; imageModels: string[];
     chatEnabled: boolean; chatGroups: number[]; chatModels: string[];
-    videoEnabled: boolean; videoProtocol: "seedance" | "openai"; videoGroup: number; videoModels: string[]; videoSeconds: number;
-    extraVideoRoutes: { model: string; group: number; protocol: "seedance" | "openai" }[];
+    videoEnabled: boolean; videoProtocol: CanvasVideoProtocol; videoGroup: number; videoModels: string[]; videoSeconds: number;
+    extraVideoRoutes: { model: string; group: number; protocol: CanvasVideoProtocol; resolutions?: string[]; durations?: number[] }[];
     resultHosts: string[];
 };
 export type CosSettings = { bucket: string; region: string; domain: string; secretId?: string; secretKey?: string };

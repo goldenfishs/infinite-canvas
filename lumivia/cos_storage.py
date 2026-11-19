@@ -85,17 +85,18 @@ class Cos:
                                      **({"Domain": domain} if domain else {})), retry=1)
 
     def verify(self):
-        key = PREFIX + "check-" + uuid.uuid4().hex
+        import requests
+
+        name = "check-" + uuid.uuid4().hex
+        key = PREFIX + name
+        sample = b"lumivia-canvas-check"
         client = self.client()
-        client.put_object(Bucket=self.bucket, Key=key, Body=b"lumivia-canvas-check", ContentType="application/octet-stream",
+        client.put_object(Bucket=self.bucket, Key=key, Body=sample, ContentType="application/octet-stream",
                           ServerSideEncryption="AES256")
         try:
-            result = client.get_object(Bucket=self.bucket, Key=key)["Body"].get_raw_stream()
-            try:
-                if result.read(32) != b"lumivia-canvas-check":
-                    raise ValueError("COS check did not return uploaded content")
-            finally:
-                result.close()
+            with requests.get(self.link(name, "connection-check.bin"), stream=True, timeout=25, allow_redirects=False) as result:
+                if result.status_code != 200 or result.raw.read(len(sample) + 1) != sample:
+                    raise ValueError("The signed COS download did not return the uploaded file")
         finally:
             client.delete_object(Bucket=self.bucket, Key=key)
 

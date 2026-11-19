@@ -9,6 +9,7 @@ import { canvasJobs, jobColor, jobLabels, type JobRow } from "@/services/api/can
 import { cloudStorage, type CanvasPolicy, type CanvasSettings, type CosSettings } from "@/services/api/cloud-storage";
 
 type PolicyForm = Omit<CanvasPolicy, "chatGroups"> & { chatGroups: string[]; cos?: CosSettings };
+const videoProtocols: [string, string][] = [["Seedance 原生任务", "seedance"], ["OpenAI 兼容表单", "openai"], ["MiniMax-H3 JSON", "minimax"]];
 const bytes = (value: number | null | undefined) => value === null || value === undefined ? "—" : formatBytes(value) || "0 B";
 const opts = (elements: [string, string][]) => elements.map(([label, value]) => ({ label, value }));
 
@@ -120,7 +121,7 @@ function Settings() {
                         <Form.Item name={["cos", "secretId"]} label="SecretId"><Input.Password autoComplete="new-password" placeholder={result.cos ? "留空沿用" : "存储桶专用密钥"} /></Form.Item>
                         <Form.Item name={["cos", "secretKey"]} label="SecretKey"><Input.Password autoComplete="new-password" placeholder={result.cos ? "留空沿用" : "存储桶专用密钥"} /></Form.Item>
                     </div>
-                    <p className="text-xs text-muted-foreground">保存时会向桶内写入、读取并删除一个小测试文件。切换保存位置不会搬动旧素材。</p>
+                    <p className="text-xs text-muted-foreground">保存前会上传一个测试文件，用签名链接下载并清理测试文件。新素材按选定位置保存，旧素材留在原处。</p>
                 </details>
             </section>
             <div className="space-y-4">
@@ -139,14 +140,20 @@ function Settings() {
                     <TagsField name="imageModels" label="图片模型白名单" hint="留空使用生图分组的 GPT Image 模型。" />
                     <div className="grid grid-cols-2 gap-x-3">
                         <NumberField name="videoGroup" label="视频分组 ID" min={0} max={Number.MAX_SAFE_INTEGER} />
-                        <Form.Item name="videoProtocol" label="视频协议"><Select options={opts([["Seedance 原生任务", "seedance"], ["OpenAI 兼容视频", "openai"]])} /></Form.Item>
+                        <Form.Item name="videoProtocol" label="视频协议"><Select options={opts(videoProtocols)} /></Form.Item>
                     </div>
                     <TagsField name="videoModels" label="视频模型白名单" hint="开启视频时必填，需在分组模型列表中存在。" />
                     <Form.List name="extraVideoRoutes">{(routes, { add, remove }) => <div className="mb-4 space-y-2">
                         {routes.map((route) => <div key={route.key} className="grid grid-cols-2 gap-x-3 rounded-lg border border-border p-3">
                             <Form.Item className="col-span-2" name={[route.name, "model"]} label="额外视频模型" rules={[{ required: true }]}><Input placeholder="模型 ID" /></Form.Item>
                             <Form.Item name={[route.name, "group"]} label="分组 ID" rules={[{ required: true, type: "integer", min: 1 }]}><InputNumber min={1} precision={0} className="!w-full" /></Form.Item>
-                            <Form.Item name={[route.name, "protocol"]} label="协议" rules={[{ required: true }]}><Select options={opts([["Seedance", "seedance"], ["OpenAI 兼容", "openai"]])} /></Form.Item>
+                            <Form.Item name={[route.name, "protocol"]} label="协议" rules={[{ required: true }]}><Select options={opts(videoProtocols)} /></Form.Item>
+                            <Form.Item className="col-span-2 sm:col-span-1" name={[route.name, "resolutions"]} label="可选分辨率">
+                                <Select mode="multiple" placeholder="使用协议默认值" options={["480p", "720p", "768p", "1080p", "1440p"].map((value) => ({ value }))} />
+                            </Form.Item>
+                            <Form.Item className="col-span-2 sm:col-span-1" name={[route.name, "durations"]} label="可选时长（秒）">
+                                <Select mode="multiple" placeholder="使用全站时长范围" options={Array.from({ length: 12 }, (_, index) => ({ value: index + 4 }))} />
+                            </Form.Item>
                             <Button size="small" type="text" danger onClick={() => remove(route.name)}>移除此项</Button>
                         </div>)}
                         <Button size="small" disabled={routes.length >= 12} onClick={() => add({ protocol: "openai" })}>添加额外视频渠道</Button>
