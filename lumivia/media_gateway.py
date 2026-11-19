@@ -29,6 +29,14 @@ class Review(CanvasError):
     """Sub2 may already have accepted or billed the request."""
 
 
+class RetryableDownload(CanvasError):
+    """A later download can succeed without starting a new generation."""
+
+
+def retryable_download_status(status):
+    return status in (403, 404, 408, 410, 429) or 500 <= status < 600
+
+
 def safe_ip(value):
     address = ip_address(value)
     if address.version == 6 and address.ipv4_mapped:
@@ -82,6 +90,8 @@ async def download_media(session, url, allowed, path, limit):
             if response.status in (301, 302, 303, 307, 308) and response.headers.get("Location"):
                 url = urljoin(url, response.headers["Location"])
                 continue
+            if retryable_download_status(response.status):
+                raise RetryableDownload(502, "上游文件暂时无法读取")
             if response.status != 200 or response.headers.get("Content-Encoding", "identity") != "identity":
                 raise CanvasError(502, "暂时无法从上游取回结果，请联系管理员")
             return await stream_file(response, path, limit)
@@ -280,6 +290,8 @@ class MediaGateway:
                     return await stream_file(response, path, row["cap"])
                 if response.status in (302, 303, 307, 308) and response.headers.get("Location"):
                     return await download_media(self.public, response.headers["Location"], allowed, path, row["cap"])
+                if retryable_download_status(response.status):
+                    raise RetryableDownload(502, "主站的视频文件暂时无法读取")
         raise CanvasError(502, "主站未返回可保存的视频")
 
 

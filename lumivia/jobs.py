@@ -15,13 +15,14 @@ from aiohttp import web
 from canvas_policy import CanvasError, MIB
 from cloud_storage import FILE_ID, PAGE_SIZE, TYPES, identify, now_ms, offset
 from managed_keys import managed_secret
-from media_gateway import MediaGateway, Pending, Review
+from media_gateway import MediaGateway, Pending, RetryableDownload, Review
 
 LOG = logging.getLogger("canvas.jobs")
 PENDING_SQL = "('staging','queued','submitting','waiting')"
 SIZE = re.compile(r"(?:auto|[1-9][0-9]{2,3}x[1-9][0-9]{2,3})\Z")
 MAX_REFERENCES = 8
 MAX_REFERENCE_BYTES = 64 * MIB
+MAX_DOWNLOAD_RETRIES = 3
 
 
 async def bounded_json(content, limit=8192):
@@ -62,7 +63,8 @@ class Jobs:
                 address TEXT NOT NULL, protocol TEXT NOT NULL, status TEXT NOT NULL, external TEXT, input TEXT NOT NULL,
                 label TEXT NOT NULL, count INTEGER NOT NULL, cap INTEGER NOT NULL, result_limit INTEGER NOT NULL,
                 backend INTEGER NOT NULL, days INTEGER NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL,
-                next INTEGER NOT NULL, polls INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT ''
+                next INTEGER NOT NULL, polls INTEGER NOT NULL DEFAULT 0, message TEXT NOT NULL DEFAULT '',
+                download_retries INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS canvas_jobs_owner ON canvas_jobs(owner,created DESC,id DESC);
             CREATE INDEX IF NOT EXISTS canvas_jobs_dispatch ON canvas_jobs(status,next,created);
@@ -71,6 +73,9 @@ class Jobs:
             UPDATE canvas_jobs SET status='failed',input='',address='',message='服务重启时上传未完成，尚未发送给主站' WHERE status='staging';
             DELETE FROM canvas_reservations WHERE id IN(SELECT id FROM canvas_jobs WHERE status IN ('review','failed','cancelled','completed'));
         """)
+        if "download_retries" not in {column[1] for column in self.db.execute("PRAGMA table_info(canvas_jobs)")}:
+            with self.db:
+                self.db.execute("ALTER TABLE canvas_jobs ADD COLUMN download_retries INTEGER NOT NULL DEFAULT 0")
         self.recover_stage()
 
     def recover_stage(self):
@@ -285,11 +290,14 @@ class Jobs:
                 task.cancel()
             await asyncio.gather(*self.active.values(), return_exceptions=True)
 
-    def postpone(self, row, external):
+    def postpone(self, row, external, *, retry_download=False):
         attempts = row["polls"] + 1
+        message = "结果下载暂时中断，正在重新取回原任务" if retry_download else ""
         with self.db:
-            self.db.execute("UPDATE canvas_jobs SET status='waiting',external=?,input='',updated=?,next=?,polls=? WHERE id=?",
-                            (external, now_ms(), now_ms() + min(24000, 3000 * attempts), attempts, row["id"]))
+            self.db.execute("""UPDATE canvas_jobs SET status='waiting',external=?,input='',updated=?,next=?,polls=?,
+                            download_retries=download_retries+?,message=? WHERE id=?""",
+                            (external, now_ms(), now_ms() + min(24000, 3000 * attempts), attempts,
+                             int(retry_download), message, row["id"]))
         self.clear_references(row["id"])
 
     async def work(self, row):
@@ -348,13 +356,17 @@ class Jobs:
             self.postpone(row, row["external"])
         except Review as exc:
             self.finish(key, "review", exc.message)
-        except CanvasError as exc:
-            self.finish(key, "review" if saving else "failed", exc.message + ("；请先查主站用量，避免重复提交" if saving else ""))
-        except (aiohttp.ClientError, TimeoutError) as exc:
+        except (RetryableDownload, aiohttp.ClientError, TimeoutError):
             if row["external"] and not saving:
                 self.postpone(row, row["external"])
+            elif row["external"] and row["download_retries"] < MAX_DOWNLOAD_RETRIES:
+                self.postpone(row, row["external"], retry_download=True)
+            elif saving:
+                self.finish(key, "review", "暂时无法取回结果，请用任务编号核对主站用量")
             else:
-                self.finish(key, "review", "上游或存储网络中断，受理情况不明，请先查主站用量")
+                self.finish(key, "review", "上游网络中断，受理情况不明，请先查主站用量")
+        except CanvasError as exc:
+            self.finish(key, "review" if saving else "failed", exc.message + ("；请先查主站用量，避免重复提交" if saving else ""))
         except Exception as exc:
             LOG.warning("task processing failed id=%s type=%s", key, type(exc).__name__)
             self.finish(key, "review", "处理结果时出现异常，请管理员核对主站用量")

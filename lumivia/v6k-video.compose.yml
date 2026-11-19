@@ -1,0 +1,26 @@
+name: lumivia-canvas-video
+
+services:
+  lumivia-canvas-v6k:
+    image: ghcr.io/basketikun/infinite-canvas:v0.20.0
+    entrypoint: [nginx, '-g', 'daemon off;']
+    restart: unless-stopped
+    user: '101:101'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=8m,mode=1777
+    volumes:
+      - ./v6k-video.nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: [CMD, wget, '-q', '-O', /dev/null, 'http://127.0.0.1:8080/healthz']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks: [sub2]
+
+networks:
+  sub2:
+    external: true
+    name: ${SUB2_DOCKER_NETWORK:-sub2api-official_sub2api-network}

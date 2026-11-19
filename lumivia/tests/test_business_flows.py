@@ -47,7 +47,7 @@ class BusinessFlows(unittest.IsolatedAsyncioTestCase):
         self.calls, self.keys = [], {}
         self.mode = "async"
         self.image_ready = False
-        self.video_ready = True
+        self.video_content_failures = 0
         self.reply_size = None
         upstream = web.Application()
         upstream.router.add_get("/api/v1/auth/me", self.identity)
@@ -65,7 +65,7 @@ class BusinessFlows(unittest.IsolatedAsyncioTestCase):
         upstream.router.add_get("/api/v3/contents/generations/tasks/video-ref", self.poll_video)
         upstream.router.add_post("/v1/videos", self.submit_compat_video)
         upstream.router.add_get("/v1/videos/compat-ref", lambda r: web.json_response({"id": "compat-ref", "status": "completed"}))
-        upstream.router.add_get("/v1/videos/compat-ref/content", lambda r: web.Response(body=MP4, content_type="video/mp4"))
+        upstream.router.add_get("/v1/videos/compat-ref/content", self.compat_video_content)
         upstream.router.add_get("/v1/videos/minimax-ref", lambda r: web.json_response({
             "id": "minimax-ref", "status": "completed", "metadata": {"url": "https://assets.test/video.mp4"}}))
         self.upstream = TestServer(upstream)
@@ -151,6 +151,13 @@ class BusinessFlows(unittest.IsolatedAsyncioTestCase):
         self.calls.append(("get-video", req.headers["Authorization"]))
         return web.json_response({"id": "video-ref", "status": "succeeded", "content": {"video_url": "https://assets.test/video.mp4"}})
 
+    async def compat_video_content(self, req):
+        self.calls.append(("get-content", req.headers["Authorization"]))
+        if self.video_content_failures:
+            self.video_content_failures -= 1
+            return web.Response(status=503)
+        return web.Response(body=MP4, content_type="video/mp4")
+
     async def submit_compat_video(self, req):
         if req.content_type == "application/json":
             self.calls.append(("post-minimax", req.headers["Authorization"]))
@@ -158,6 +165,7 @@ class BusinessFlows(unittest.IsolatedAsyncioTestCase):
             assert body == {"seconds": "10", "size": "1366x768", "model": VIDEO, "prompt": "motion"}, body
             return web.json_response({"task_id": "minimax-ref"})
         assert req.content_type == "multipart/form-data"
+        self.calls.append(("post-compat", req.headers["Authorization"]))
         body = await req.post()
         assert body["seconds"] == "4" and body["model"] == VIDEO
         return web.json_response({"id": "compat-ref"})
@@ -326,6 +334,18 @@ class BusinessFlows(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row["status"], "completed", row["message"])
             self.assertEqual(self.app["jobs"].summary(row)["assets"][0]["mime"], "video/mp4")
         self.assertTrue(all(c[-1] == "Bearer " + managed_secret(7, 99, "video") for c in self.calls))
+
+    async def test_retries_video_download_without_submitting_again(self):
+        self.video_content_failures = 1
+        await self.policy({"videoEnabled": True, "videoGroup": 99, "videoModels": [VIDEO], "videoProtocol": "openai"})
+        key = uuid.uuid4().hex
+        accepted = await self.post("member", "jobs/video", {"id": key, "model": VIDEO, "prompt": "motion",
+                                   "seconds": 4, "ratio": "16:9", "resolution": "720p"}, model=VIDEO)
+        self.assertEqual(accepted.status, 202, await accepted.text())
+        row = await self.wait_state(key, ("completed", "review", "failed"), timeout=15)
+        self.assertEqual(row["status"], "completed", row["message"])
+        self.assertEqual(row["external"], "compat-ref")
+        self.assertEqual([kind for kind, *_ in self.calls], ["post-compat", "get-content", "get-content"])
 
     async def test_cos_rotation_local_compat_and_expiry(self):
         store = self.app["storage"]
