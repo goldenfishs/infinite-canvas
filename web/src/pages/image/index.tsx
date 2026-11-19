@@ -3,7 +3,6 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
 import localforage from "localforage";
 import { saveAs } from "file-saver";
-import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
@@ -18,9 +17,9 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { dataUrlToFile, formatBytes, formatDuration, getDataUrlByteSize } from "@/lib/image-utils";
 import { cloudStorage } from "@/services/api/cloud-storage";
-import { createImageThumbnail } from "@/lib/image-thumbnail";
+import { getThumbnailDimensions } from "@/lib/image-thumbnail";
 import { requestEdit, requestGeneration } from "@/services/api/image";
-import { deleteStoredImages, ensureImagePreview, fetchImageBlob, getImagePreviewRevision, imageToDataUrl, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
+import { deleteStoredImages, ensureImagePreview, fetchImageBlob, getImageBlob, getImagePreviewRevision, imageToDataUrl, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import type { ReferenceImage } from "@/types/image";
@@ -421,7 +420,7 @@ export default function ImagePage() {
             updateSummary({ localSave });
             const image = archived[0];
             if (!image?.dataUrl || !/^(data:|blob:)/.test(image.dataUrl)) return;
-            const thumbnail = await historyThumbnail(image.dataUrl).catch(() => undefined);
+            const thumbnail = await historyThumbnail(image).catch(() => undefined);
             if (thumbnail && !removedLogs.current.has(log.id)) {
                 await logThumbnails.setItem(log.id, thumbnail);
                 updateSummary({ thumbnail });
@@ -451,9 +450,9 @@ export default function ImagePage() {
     const saveResultToCloud = async (image: GeneratedImage) => {
         try {
             const account = lumiviaImageAccount();
-            const blob = await fetchImageBlob(image.dataUrl || await resolveImageUrl(image.storageKey, ""), { signal: AbortSignal.timeout(60_000) });
+            const blob = await originalImageBlob(image);
             await cloudStorage.upload(blob, account);
-            message.success(<>已存入 <Link to="/storage" className="underline">云图库</Link></>);
+            message.success("已存入云图库");
         } catch (error) { message.error((error as Error).message || "保存云端图片失败"); }
     };
 
@@ -979,15 +978,37 @@ function summarizeLog(log: GenerationLog, id = log.id): LogSummary {
     return { ...summary, id, title: (log.title || log.model || i18n.t("workbench.untitled")).slice(0, 120), prompt: "", createdAt: log.createdAt || 0 };
 }
 
-async function historyThumbnail(url: string) {
-    const thumbnail = await createImageThumbnail(await fetchImageBlob(url), 96);
-    if (!thumbnail || thumbnail.size > 16 * 1024) return undefined;
-    return new Promise<string | undefined>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => resolve(undefined);
-        reader.readAsDataURL(thumbnail);
-    });
+async function originalImageBlob(image: GeneratedImage) {
+    // WebKit in a nested page can reject fetch(data:). Decode locally like the download button.
+    if (image.dataUrl.startsWith("data:")) {
+        const file = dataUrlToFile({ id: image.id, name: "original", type: image.mimeType || "image/png", dataUrl: image.dataUrl });
+        if (file.size) return file;
+        throw new Error(i18n.t("common.imageReadFailed"));
+    }
+    if (image.storageKey) {
+        const blob = await getImageBlob(image.storageKey);
+        if (blob) return blob;
+    }
+    return fetchImageBlob(image.dataUrl, { signal: AbortSignal.timeout(60_000) });
+}
+
+async function historyThumbnail(image: GeneratedImage) {
+    // The result is a trusted data: or local blob: URL. Draw from the loaded image
+    // so thumbnail creation also works in older WebKit without createImageBitmap.
+    const original = new window.Image();
+    original.src = image.dataUrl;
+    await original.decode();
+    const { width, height } = getThumbnailDimensions(original.naturalWidth, original.naturalHeight, 96);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) return undefined;
+    context.drawImage(original, 0, 0, width, height);
+    const data = canvas.toDataURL("image/webp", 0.72);
+    if (data.length <= 16 * 1024) return data;
+    const compact = canvas.toDataURL("image/jpeg", 0.65);
+    return compact.length <= 16 * 1024 ? compact : undefined;
 }
 
 async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog> {
