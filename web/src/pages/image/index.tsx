@@ -15,7 +15,7 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
-import { formatBytes, formatDuration, getDataUrlByteSize } from "@/lib/image-utils";
+import { dataUrlToFile, formatBytes, formatDuration, getDataUrlByteSize } from "@/lib/image-utils";
 import { requestEdit, requestGeneration } from "@/services/api/image";
 import { deleteStoredImages, ensureImagePreview, getImagePreviewRevision, imageToDataUrl, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
@@ -247,13 +247,36 @@ export default function ImagePage() {
     }, [autoRunToken]);
 
     const downloadImage = (image: GeneratedImage, index: number) => {
-        if (image.dataUrl.startsWith("data:")) {
-            const link = document.createElement("a");
-            link.href = image.dataUrl;
-            link.download = `image-${index + 1}.png`;
+        const mimeType = image.dataUrl.match(/^data:(image\/[\w.+-]+);base64,/i)?.[1] || image.mimeType || "image/png";
+        const filename = `image-${index + 1}.${mimeType.split("/")[1] || "png"}`;
+        if (/^https?:\/\//i.test(image.dataUrl)) {
+            saveAs(image.dataUrl, filename);
+            return;
+        }
+        const link = document.createElement("a");
+        let objectUrl: string | undefined;
+        try {
+            // Safari can ignore a data: download inside an embedded page. Hand it a Blob URL during the click.
+            if (image.dataUrl.startsWith("data:")) {
+                const file = dataUrlToFile({ id: image.id, name: filename, type: mimeType, dataUrl: image.dataUrl });
+                if (!file.size) throw new Error(t("common.imageReadFailed"));
+                objectUrl = URL.createObjectURL(file);
+            } else if (!image.dataUrl.startsWith("blob:")) {
+                throw new Error(t("common.imageReadFailed"));
+            }
+            link.href = objectUrl || image.dataUrl;
+            link.download = filename;
+            link.hidden = true;
+            document.body.append(link);
             link.click();
-        } else {
-            saveAs(image.dataUrl, `image-${index + 1}.png`);
+        } catch {
+            message.error(t("imageWorkbench.downloadFailed"));
+        } finally {
+            link.remove();
+            if (objectUrl) {
+                const url = objectUrl;
+                window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+            }
         }
     };
 

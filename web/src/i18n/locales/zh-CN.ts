@@ -182,6 +182,7 @@ export default {
         generated: "图片已生成",
         addedReference: "已加入参考图",
         addReferenceFailed: "无法读取原图，未加入参考图。请重新打开原图，或下载后手动上传。",
+        downloadFailed: "无法准备下载文件，请打开大图后尝试保存原图。",
         resultTitle: "生成结果 {{count}}",
         source: "生图工作台",
         unsupportedAsset: "生图工作台只能使用文本或图片资产",

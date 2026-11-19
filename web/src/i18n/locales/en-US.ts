@@ -182,6 +182,7 @@ export default {
         generated: "Images generated",
         addedReference: "Added to reference images",
         addReferenceFailed: "Could not read the original image. Open it again, or download and upload it manually.",
+        downloadFailed: "Could not prepare the download. Open the full preview and try saving the original.",
         resultTitle: "Generated image {{count}}",
         source: "Image Studio",
         unsupportedAsset: "Image Studio only supports text and image assets",
