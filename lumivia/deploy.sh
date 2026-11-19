@@ -67,7 +67,19 @@ def change(name,rules,up=None):
 def location(path,extra=''):
     return '    location '+path+' {\n        access_log off;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_pass http://127.0.0.1:3031;\n'+extra+'    }\n'
 change('sub2api',location('= /canvas-entry')+location('= /canvas-connect/')+location('= /canvas-connect/approve'))
-change('lumivia-canvas',location('^~ /lumivia/','        client_max_body_size 64m;\n        proxy_read_timeout 610s;\n        proxy_request_buffering off;\n        proxy_buffering off;\n        proxy_http_version 1.1;\n'),sys.argv[1])
+assets = f"""    location ^~ /assets/ {{
+        gzip on;
+        gzip_vary on;
+        gzip_proxied any;
+        gzip_min_length 1024;
+        gzip_types application/javascript text/javascript text/css application/json image/svg+xml;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://127.0.0.1:{sys.argv[1]};
+    }}
+"""
+change('lumivia-canvas',location('^~ /lumivia/','        client_max_body_size 64m;\n        proxy_read_timeout 610s;\n        proxy_request_buffering off;\n        proxy_buffering off;\n        proxy_http_version 1.1;\n')+assets,sys.argv[1])
 PY
 nginx -t && systemctl reload nginx
 ready=0
