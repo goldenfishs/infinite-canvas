@@ -181,6 +181,7 @@ export default {
         busy: "生图工作台已有任务正在运行",
         generated: "图片已生成",
         addedReference: "已加入参考图",
+        addReferenceFailed: "无法读取原图，未加入参考图。请重新打开原图，或下载后手动上传。",
         resultTitle: "生成结果 {{count}}",
         source: "生图工作台",
         unsupportedAsset: "生图工作台只能使用文本或图片资产",

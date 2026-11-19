@@ -181,6 +181,7 @@ export default {
         busy: "The Image Studio is already running a task",
         generated: "Images generated",
         addedReference: "Added to reference images",
+        addReferenceFailed: "Could not read the original image. Open it again, or download and upload it manually.",
         resultTitle: "Generated image {{count}}",
         source: "Image Studio",
         unsupportedAsset: "Image Studio only supports text and image assets",

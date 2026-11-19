@@ -258,9 +258,17 @@ export default function ImagePage() {
     };
 
     const addResultToReferences = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.dataUrl);
-        setReferences((value) => [...value, { id: nanoid(), name: `result-${index + 1}.png`, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
-        message.success(t("imageWorkbench.addedReference"));
+        try {
+            // Reuse the original bytes without waiting for a local file or thumbnail write.
+            const dataUrl = await imageToDataUrl(image, { signal: AbortSignal.timeout(20_000) });
+            const type = dataUrl.match(/^data:(image\/[\w.+-]+);base64,/i)?.[1];
+            if (!type) throw new Error(t("common.imageReadFailed"));
+            const extension = type.split("/")[1];
+            setReferences((value) => [...value, { id: nanoid(), name: `result-${index + 1}.${extension}`, type, dataUrl }]);
+            message.success(t("imageWorkbench.addedReference"));
+        } catch {
+            message.error(t("imageWorkbench.addReferenceFailed"));
+        }
     };
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
@@ -622,7 +630,7 @@ function ResultImageCard({
 }: {
     image: GeneratedImage;
     index: number;
-    onEdit: (image: GeneratedImage, index: number) => void;
+    onEdit: (image: GeneratedImage, index: number) => Promise<void>;
     onDownload: (image: GeneratedImage, index: number) => void;
     onSaveAsset: (image: GeneratedImage, index: number) => void;
 }) {
@@ -630,9 +638,24 @@ function ResultImageCard({
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const [dimensions, setDimensions] = useState("");
     const [failed, setFailed] = useState(false);
+    const [addingReference, setAddingReference] = useState(false);
+    const addReference = async () => {
+        setAddingReference(true);
+        try {
+            await onEdit(image, index);
+        } finally {
+            setAddingReference(false);
+        }
+    };
     return (
-        <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <Image src={previewUrlFor(image.storageKey) || image.dataUrl} preview={{ src: image.dataUrl }} onLoad={(event) => { const img = event.currentTarget; setFailed(false); setDimensions(`${img.naturalWidth}x${img.naturalHeight}`); }} onError={() => setFailed(true)} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
+        <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800" onLoadCapture={(event) => {
+            const img = event.target;
+            if (img instanceof HTMLImageElement && event.currentTarget.contains(img) && img.naturalWidth && img.naturalHeight) {
+                setFailed(false);
+                setDimensions(`${img.naturalWidth}x${img.naturalHeight}`);
+            }
+        }}>
+            <Image src={previewUrlFor(image.storageKey) || image.dataUrl} preview={{ src: image.dataUrl }} onError={() => setFailed(true)} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
             <div className="space-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
                 {failed && <div className="text-xs text-amber-600 dark:text-amber-400">{t("imageWorkbench.previewUnavailable")}</div>}
                 <div className="flex min-w-0 gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
@@ -649,7 +672,7 @@ function ResultImageCard({
                         </Button>
                     </Tooltip>
                     <Tooltip title={t("imageWorkbench.addReference")}>
-                        <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<PenLine className="size-3.5" />} onClick={() => void onEdit(image, index)}>
+                        <Button className={RESULT_ACTION_BUTTON_CLASS} size="small" icon={<PenLine className="size-3.5" />} loading={addingReference} onClick={() => void addReference()}>
                             {t("imageWorkbench.addReference")}
                         </Button>
                     </Tooltip>
