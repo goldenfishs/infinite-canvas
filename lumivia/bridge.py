@@ -15,17 +15,13 @@ CANVAS = 'https://canvas.lumivia.cn'
 UP = os.getenv('SUB2_URL', 'http://127.0.0.1:8080')
 GROUP = int(os.getenv('IMAGE_GROUP_ID', '88'))
 KEY_NAME = 'Lumivia Canvas · ' + str(GROUP)
-FLOW, SID = '__Host-canvas-flow', '__Host-canvas-session'
-codes, sessions = {}, {}
+grants = {}
+IMAGE_ACTIONS = ('generations', 'edits')
 routes = web.RouteTableDef()
 
 
 def failure(status, message):
     return web.json_response({'error': {'message': message}}, status=status)
-
-
-def cookie(resp, name, val, age):
-    resp.set_cookie(name, val, secure=True, httponly=True, samesite='Lax', max_age=age, path='/')
 
 
 def digest(s):
@@ -40,46 +36,60 @@ async def protect(req, handler):
             return failure(403, '来源校验失败')
     try:
         resp = await handler(req)
-    except web.HTTPForbidden as e:
-        resp = failure(403, e.text)
+    except (web.HTTPUnauthorized, web.HTTPForbidden) as e:
+        resp = failure(e.status, e.text)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         resp = failure(502, '主站暂时无法响应，请重试')
     resp.headers.update({'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff'})
     return resp
 
 
-@routes.get('/lumivia/start')
-async def start(req):
-    verifier = secrets.token_urlsafe(32)
-    resp = web.Response(status=302, headers={'Location': MAIN + '/canvas-connect/#' + digest(verifier)})
-    cookie(resp, FLOW, verifier, 600)
-    return resp
+@routes.get('/canvas-entry')
+async def entry(req):
+    # Sub2 can append auth and navigation parameters to custom-menu URLs.
+    # Strip the query before rendering any document or requesting other resources.
+    if req.query_string:
+        return web.Response(status=303, headers={'Location': '/canvas-entry'})
+    html = Path(__file__).with_name('entry.html').read_text()
+    return web.Response(text=html, content_type='text/html', headers={
+        'Content-Security-Policy': f"default-src 'none'; style-src 'unsafe-inline'; frame-src {CANVAS}; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+    })
 
 
 @routes.get('/canvas-connect/')
 async def consent(req):
     nonce = secrets.token_urlsafe(24)
     html = Path(__file__).with_name('consent.html').read_text().replace('SCRIPT_NONCE', nonce)
-    return web.Response(text=html, content_type='text/html', headers={'Content-Security-Policy': f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"})
+    return web.Response(text=html, content_type='text/html', headers={
+        'Content-Security-Policy': f"default-src 'none'; script-src 'nonce-{nonce}'; connect-src 'self'; frame-ancestors {MAIN} {CANVAS}; base-uri 'none'; form-action 'none'",
+    })
 
 
 @routes.post('/canvas-connect/approve')
 async def approve(req):
     data = await req.json()
-    state = data.get('state', '')
+    if not isinstance(data, dict): return failure(400, '账号同步请求格式错误')
+    action = data.get('action')
+    challenge = data.get('challenge')
     auth = req.headers.get('Authorization', '')
-    if not re.fullmatch('[a-f0-9]{64}', state) or not auth.startswith('Bearer '):
-        return failure(400, '请从画布重新开始授权')
+    if action not in ('account', *IMAGE_ACTIONS) or not auth.startswith('Bearer '):
+        return failure(400, '账号同步请求格式错误')
+    if action != 'account' and (not isinstance(challenge, str) or not re.fullmatch('[a-f0-9]{64}', challenge) or type(data.get('account_id')) is not int):
+        return failure(400, '生图授权请求格式错误')
     http = req.app['http']
     headers = {'Authorization': auth, 'User-Agent': req.headers.get('User-Agent', ''), 'X-Forwarded-For': req.headers.get('X-Real-IP', req.remote or '')}
 
     async def api(path, payload=None):
         async with http.request('GET' if payload is None else 'POST', UP+'/api/v1/'+path, json=payload, headers=headers, allow_redirects=False) as r:
-            if r.status in (401, 403): raise web.HTTPForbidden(text='登录已过期或没有权限，请重新登录主站')
+            if r.status == 401: raise web.HTTPUnauthorized(text='请先登录主站')
+            if r.status == 403: raise web.HTTPForbidden(text='主站账号没有权限')
             if r.status != 200: raise ValueError('sub2')
             return (await r.json())['data']
 
-    user, groups, rates = await asyncio.gather(api('auth/me'), api('groups/available'), api('groups/rates'))
+    user = await api('auth/me')
+    if action != 'account' and data['account_id'] != user['id']:
+        return failure(409, '主站账号已切换，请重新确认后再生成')
+    groups, rates = await asyncio.gather(api('groups/available'), api('groups/rates')) if action == 'account' else (await api('groups/available'), {})
     group = next((g for g in groups if g['id'] == GROUP), None)
     if not group: return failure(403, '此账号没有生图分组权限')
     async with req.app['key_lock']:
@@ -91,52 +101,31 @@ async def approve(req):
         if not key: key = await api('keys', {'name': KEY_NAME, 'group_id': GROUP})
         if not scoped(key): return failure(403, '画布专用密钥分组不正确')
     secret = key['key']
+    if action != 'account':
+        grant = secrets.token_urlsafe(32)
+        grants[grant] = (time.monotonic() + 20, challenge, action, secret)
+        return web.json_response({'grant': grant})
     async with http.get(UP+'/v1/models', headers={'Authorization': 'Bearer '+secret}, allow_redirects=False) as r:
         if r.status != 200: return failure(503, '暂时无法读取生图分组模型')
         models = sorted({m['id'] for m in (await r.json()).get('data', []) if re.fullmatch(r'gpt-image-[\w.-]+', m.get('id',''))})
     if not models: return failure(503, '主站没有返回可用图片模型')
     rate = group['image_rate_multiplier'] if group.get('image_rate_independent') else (rates or {}).get(str(GROUP),group['rate_multiplier'])
     prices = {size: round(group['image_price_'+size]*rate,6) for size in ('1k','2k','4k') if group.get('image_price_'+size) is not None and not group.get('peak_rate_enabled')}
-    public = {'email': user['email'], 'models': models, 'prices': prices, 'group': group['name']}
-    code = secrets.token_urlsafe(32)
-    codes[code] = (time.monotonic()+90, state, secret, public)
-    return web.json_response({'next': CANVAS+'/lumivia/finish?code='+code})
-
-
-@routes.get('/lumivia/finish')
-async def finish(req):
-    code = req.query.get('code',''); grant = codes.get(code)
-    if not grant or grant[0] <= time.monotonic() or not secrets.compare_digest(grant[1],digest(req.cookies.get(FLOW,''))):
-        return failure(403, '授权已失效，请从画布重新进入')
-    del codes[code]
-    sessions.pop(req.cookies.get(SID,''), None)
-    sid = secrets.token_urlsafe(32); sessions[sid] = (time.monotonic()+28800, grant[2], grant[3])
-    resp = web.Response(status=303, headers={'Location':'/canvas'})
-    cookie(resp,FLOW,'',0); cookie(resp,SID,sid,28800)
-    return resp
-
-
-def session(req):
-    s = sessions.get(req.cookies.get(SID,'')); return s if s and s[0]>time.monotonic() else None
-
-
-@routes.get('/lumivia/session')
-async def status(req):
-    s = session(req); return web.json_response(s[2] if s else None)
-
-
-@routes.post('/lumivia/logout')
-async def logout(req):
-    sessions.pop(req.cookies.get(SID,''),None)
-    resp = web.json_response({'ok': True}); cookie(resp,SID,'',0); return resp
+    public = {'id': user['id'], 'email': user['email'], 'models': models, 'prices': prices, 'group': group['name']}
+    return web.json_response({'account': public})
 
 
 @routes.post('/lumivia/v1/images/{action:generations|edits}')
 async def images(req):
-    s = session(req)
-    if not s: return failure(401, '请先用乐米账号登录画布')
+    action = req.match_info['action']
+    grant_id = req.headers.get('X-Lumivia-Grant', '')
+    verifier = req.headers.get('X-Lumivia-Verifier', '')
+    grant = grants.get(grant_id)
+    if not grant or grant[0] <= time.monotonic() or grant[2] != action or not re.fullmatch('[a-f0-9]{64}', verifier) or not secrets.compare_digest(grant[1], digest(verifier)):
+        return failure(401, '当前主站账号授权已失效，请重试')
+    del grants[grant_id]
     if req.content_type not in ('multipart/form-data','application/json'): return failure(415,'不支持的请求格式')
-    async with req.app['http'].post(UP+'/v1/images/'+req.match_info['action'],data=req.content.iter_chunked(65536),headers={'Authorization':'Bearer '+s[1],'Content-Type':req.headers['Content-Type'], 'X-Forwarded-For':req.headers.get('X-Real-IP',req.remote or '')},allow_redirects=False) as r:
+    async with req.app['http'].post(UP+'/v1/images/'+action,data=req.content.iter_chunked(65536),headers={'Authorization':'Bearer '+grant[3],'Content-Type':req.headers['Content-Type'], 'X-Forwarded-For':req.headers.get('X-Real-IP',req.remote or '')},allow_redirects=False) as r:
         # Only relay JSON. The upstream gateway retains all authorization and billing decisions.
         if r.content_type!='application/json': return failure(502,'生图服务返回了非 JSON 响应')
         out = web.StreamResponse(status=r.status,headers={'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'})
@@ -151,9 +140,8 @@ async def lifecycle(app):
     async def expire():
         while True:
             await asyncio.sleep(60)
-            for values in (codes,sessions):
-                for k,v in list(values.items()):
-                    if v[0]<=time.monotonic(): values.pop(k,None)
+            for key, value in list(grants.items()):
+                if value[0] <= time.monotonic(): grants.pop(key, None)
     task=asyncio.create_task(expire()); yield
     task.cancel(); await asyncio.gather(task,return_exceptions=True); await app['http'].close()
 

@@ -86,9 +86,8 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
 }
 
 function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
-    const label = capability ? i18n.t(`settingsPanels.model.capabilities.${capability}`) : "";
-    if (capability && config.models.length) return i18n.t("settingsPanels.model.assign", { capability: label });
-    return config.models.length ? i18n.t("settingsPanels.model.noMatch", { capability: label }) : i18n.t("settingsPanels.model.addFirst");
+    if (capability && capability !== "image") return i18n.t("config.lumivia.unsupported");
+    return i18n.t(config.models.length ? "config.lumivia.unavailableModel" : "config.lumivia.accountRequired");
 }
 
 function ModelLabel({ config, model }: { config: AiConfig; model: string }) {

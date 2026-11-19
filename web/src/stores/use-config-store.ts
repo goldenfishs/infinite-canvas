@@ -67,13 +67,11 @@ export type WebdavSyncConfig = {
 };
 export type ConfigTabKey = "channels" | "local-proxy" | "preferences" | "prompt-sources" | "webdav" | "local-storage";
 
-export type ChannelCredentialsImportResult = {
-    status: "created" | "updated" | "missing-base-url" | "invalid-base-url";
-    channelName?: string;
-};
-
 export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
+const LUMIVIA_CHANNEL_ID = "lumivia-image";
+const LUMIVIA_BASE_URL = "/lumivia";
+let lumiviaChannel: ModelChannel | undefined;
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
@@ -81,29 +79,15 @@ export const DEFAULT_LOCAL_PROXY_URL = "http://127.0.0.1:23210";
 
 export const defaultConfig: AiConfig = {
     channelMode: "local",
-    baseUrl: OPENAI_BASE_URL,
+    baseUrl: "",
     apiKey: "",
     apiFormat: "openai",
-    channels: [
-        {
-            id: "default",
-            name: i18n.t("config.channels.defaultName"),
-            baseUrl: OPENAI_BASE_URL,
-            apiKey: "",
-            apiFormat: "openai",
-            models: [
-                { name: "gpt-image-2", capability: "image" },
-                { name: "grok-imagine-video", capability: "video" },
-                { name: "gpt-5.5", capability: "text" },
-                { name: "gpt-4o-mini-tts", capability: "audio" },
-            ],
-        },
-    ],
-    model: "default::gpt-image-2",
-    imageModel: "default::gpt-image-2",
-    videoModel: "default::grok-imagine-video",
-    textModel: "default::gpt-5.5",
-    audioModel: "default::gpt-4o-mini-tts",
+    channels: [],
+    model: "",
+    imageModel: "",
+    videoModel: "",
+    textModel: "",
+    audioModel: "",
     audioVoice: "alloy",
     audioFormat: "mp3",
     audioSpeed: "1",
@@ -115,7 +99,7 @@ export const defaultConfig: AiConfig = {
     videoMode: "frames",
     systemPrompt: "",
     reasoningEffort: "auto",
-    models: ["default::gpt-image-2", "default::grok-imagine-video", "default::gpt-5.5", "default::gpt-4o-mini-tts"],
+    models: [],
     quality: "auto",
     size: "1:1",
     background: "",
@@ -142,7 +126,6 @@ type ConfigStore = {
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
-    importChannelCredentials: (input: { baseUrl?: string | null; apiKey?: string | null }) => ChannelCredentialsImportResult;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
     isAiConfigReady: (config: AiConfig, model: string) => boolean;
     openConfigDialog: (shouldPromptContinue?: boolean, tab?: ConfigTabKey) => void;
@@ -203,18 +186,58 @@ export function selectableModelsByCapability(config: AiConfig, capability?: Mode
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
-export function resolveModelScript(config: AiConfig, value: string) {
-    return findChannelModel(config, value)?.model.script?.trim() || "";
-}
+
 
 function isAiConfigReady(config: AiConfig, model: string) {
     const match = findChannelModel(config, model);
     return Boolean(match && match.channel.baseUrl.trim() && match.channel.apiKey.trim());
 }
 
+/** Provider state comes from the current account, never from saved or imported data. */
+export function withLumiviaChannel(config: AiConfig, channel: ModelChannel | null | undefined = lumiviaChannel): AiConfig {
+    const channels = channel ? [channel] : [];
+    const models = modelOptionsFromChannels(channels);
+    const selected = normalizeModelOptionValue(typeof config.imageModel === "string" ? config.imageModel : "", channels);
+    const preferred = encodeChannelModel(LUMIVIA_CHANNEL_ID, "gpt-image-2");
+    const imageModel = models.includes(selected) ? selected : models.includes(preferred) ? preferred : models[0] || "";
+    return {
+        ...config,
+        channelMode: "local",
+        apiFormat: "openai",
+        baseUrl: channel?.baseUrl || "",
+        apiKey: channel?.apiKey || "",
+        channels,
+        models,
+        model: imageModel,
+        imageModel,
+        videoModel: "",
+        textModel: "",
+        audioModel: "",
+        proxyEnabled: false,
+        proxyUrl: DEFAULT_LOCAL_PROXY_URL,
+    };
+}
+
+export function setLumiviaChannel(account: { group: string; models: string[] } | null) {
+    const previous = useConfigStore.getState().config;
+    lumiviaChannel = account ? {
+        id: LUMIVIA_CHANNEL_ID,
+        name: account.group,
+        baseUrl: LUMIVIA_BASE_URL,
+        apiKey: "canvas-session",
+        apiFormat: "openai",
+        models: account.models.map((name) => ({ name, capability: "image" })),
+    } : undefined;
+    useConfigStore.setState({ config: withLumiviaChannel(previous) });
+}
+
+export function configWithoutChannels(config: AiConfig): AiConfig {
+    return { ...withLumiviaChannel(config, null), imageModel: config.imageModel, model: config.imageModel };
+}
+
 export const useConfigStore = create<ConfigStore>()(
     persist(
-        (set, get) => ({
+        (set) => ({
             config: defaultConfig,
             webdav: defaultWebdavSyncConfig,
             isConfigOpen: false,
@@ -222,17 +245,11 @@ export const useConfigStore = create<ConfigStore>()(
             shouldPromptContinue: false,
             updateConfig: (key, value) =>
                 set((state) => ({
-                    config: {
+                    config: withLumiviaChannel({
                         ...state.config,
                         [key]: value,
-                    },
+                    }),
                 })),
-            importChannelCredentials: (input) => {
-                const currentConfig = get().config;
-                const result = upsertChannelCredentials(currentConfig, input);
-                if (result.config !== currentConfig) set({ config: result.config });
-                return { status: result.status, channelName: result.channelName };
-            },
             updateWebdavConfig: (key, value) =>
                 set((state) => ({
                     webdav: {
@@ -247,28 +264,19 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            partialize: (state) => ({ config: state.config, webdav: state.webdav }),
+            partialize: (state) => ({ config: configWithoutChannels(state.config), webdav: state.webdav }),
             merge: (persisted, current) => {
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
                 const persistedConfig = (persistedState.config || {}) as Partial<AiConfig>;
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
                 const config = { ...defaultConfig, ...persistedConfig };
-                if (!Array.isArray(persistedConfig.channels)) config.channels = [];
-                const channels = normalizeChannels(config);
-                const models = modelOptionsFromChannels(channels);
                 return {
                     ...current,
                     webdav: { ...defaultWebdavSyncConfig, ...persistedWebdav },
                     config: {
-                        ...config,
-                        channelMode: "local",
-                        apiFormat: normalizeApiFormat(config.apiFormat),
-                        channels,
-                        models,
-                        imageModel: normalizeModelOptionValue(config.imageModel || config.model, channels),
-                        videoModel: normalizeModelOptionValue(config.videoModel, channels),
-                        textModel: normalizeModelOptionValue(config.textModel || config.model, channels),
-                        audioModel: normalizeModelOptionValue(config.audioModel || defaultConfig.audioModel, channels),
+                        ...withLumiviaChannel(config),
+                        // Preserve only the model preference until the account supplies its catalog.
+                        imageModel: typeof config.imageModel === "string" ? config.imageModel : "",
                         audioVoice: config.audioVoice || defaultConfig.audioVoice,
                         audioFormat: config.audioFormat || defaultConfig.audioFormat,
                         audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
@@ -280,8 +288,6 @@ export const useConfigStore = create<ConfigStore>()(
                         videoWatermark: config.videoWatermark || "false",
                         videoMode: config.videoMode === "reference" ? "reference" : "frames",
                         canvasImageCount: config.canvasImageCount || "3",
-                        proxyEnabled: Boolean(config.proxyEnabled),
-                        proxyUrl: config.proxyUrl || DEFAULT_LOCAL_PROXY_URL,
                         nodeRegenerateBehavior: config.nodeRegenerateBehavior === "overwrite" ? "overwrite" : "new-node",
                         autoFocusOnSelect: Boolean(config.autoFocusOnSelect),
                     },
@@ -321,70 +327,6 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         apiFormat,
         models: normalizeChannelModels(channel?.models),
     };
-}
-
-export function upsertChannelCredentials(
-    config: AiConfig,
-    input: { baseUrl?: string | null; apiKey?: string | null },
-): ChannelCredentialsImportResult & { config: AiConfig } {
-    const rawBaseUrl = input.baseUrl?.trim() || "";
-    if (!rawBaseUrl) return { status: "missing-base-url", config };
-    if (!isHttpBaseUrl(rawBaseUrl)) return { status: "invalid-base-url", config };
-
-    const baseUrl = normalizeImportedBaseUrl(rawBaseUrl);
-    const apiKey = input.apiKey?.trim() || "";
-    const matchingIndex = config.channels.findIndex((channel) => normalizedBaseUrlKey(channel.baseUrl) === normalizedBaseUrlKey(baseUrl));
-
-    if (matchingIndex >= 0) {
-        const existing = config.channels[matchingIndex];
-        if (existing.baseUrl === baseUrl && (!apiKey || existing.apiKey === apiKey)) {
-            return { status: "updated", channelName: existing.name, config };
-        }
-        const updated = { ...existing, baseUrl, ...(apiKey ? { apiKey } : {}) };
-        const channels = config.channels.map((channel, index) => (index === matchingIndex ? updated : channel));
-        return { status: "updated", channelName: existing.name, config: { ...config, channels } };
-    }
-
-    const channel = createModelChannel({
-        name: importedChannelName(baseUrl),
-        baseUrl,
-        apiKey,
-        apiFormat: "openai",
-        models: [],
-    });
-    return { status: "created", channelName: channel.name, config: { ...config, channels: [...config.channels, channel] } };
-}
-
-function isHttpBaseUrl(baseUrl: string) {
-    try {
-        const url = new URL(baseUrl);
-        return (url.protocol === "http:" || url.protocol === "https:") && Boolean(url.hostname);
-    } catch {
-        return false;
-    }
-}
-
-function normalizedBaseUrlKey(baseUrl: string) {
-    try {
-        return stripTrailingApiVersion(normalizeImportedBaseUrl(baseUrl));
-    } catch {
-        return stripTrailingApiVersion(baseUrl.trim().replace(/\/+$/, ""));
-    }
-}
-
-function normalizeImportedBaseUrl(baseUrl: string) {
-    const url = new URL(baseUrl.trim());
-    url.hash = "";
-    return url.toString().replace(/\/+$/, "");
-}
-
-function stripTrailingApiVersion(baseUrl: string) {
-    return baseUrl.replace(/\/v1$/i, "");
-}
-
-function importedChannelName(baseUrl: string) {
-    const hostname = new URL(baseUrl).hostname;
-    return hostname.replace(/^(?:www|api)\./i, "") || i18n.t("config.channels.newName");
 }
 
 export function encodeChannelModel(channelId: string, model: string) {
@@ -428,47 +370,20 @@ export function normalizeModelOptionValue(value: string | undefined, channels: M
     return channel && channel.models.some((item) => item.name === model) ? encodeChannelModel(channel.id, model) : model;
 }
 
-export function resolveModelChannel(config: AiConfig, value: string) {
-    const decoded = decodeChannelModel(value);
-    const model = decoded?.model || value;
-    const matched = decoded ? config.channels.find((channel) => channel.id === decoded.channelId) : config.channels.find((channel) => channel.models.some((item) => item.name === model));
-    return matched || config.channels[0] || createModelChannel({ id: "default", name: i18n.t("config.channels.defaultName"), baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName).map((name) => ({ name, capability: guessCapability(name) })) });
+export function resolveModelScript(config: AiConfig, value: string) {
+    return findChannelModel(withLumiviaChannel(config), value)?.model.script?.trim() || "";
 }
 
-export function resolveModelRequestConfig(config: AiConfig, value: string) {
-    const channel = resolveModelChannel(config, value);
-    return {
-        ...config,
-        model: modelOptionName(value || config.model),
-        baseUrl: channel.baseUrl,
-        apiKey: channel.apiKey,
-        apiFormat: channel.apiFormat,
-    };
-}
-
-function normalizeChannels(config: AiConfig) {
-    const persistedChannels = Array.isArray(config.channels) ? config.channels : [];
-    const channels = persistedChannels.map((channel, index) =>
-        createModelChannel({
-            ...channel,
-            id: channel.id || (index === 0 ? "default" : `channel-${index + 1}`),
-            name: channel.name || (index === 0 ? i18n.t("config.channels.defaultName") : i18n.t("config.channels.indexedName", { index: index + 1 })),
-            models: normalizeChannelModels(channel.models),
-        }),
-    );
-    if (!channels.length) {
-        channels.push(
-            createModelChannel({
-                id: "default",
-                name: i18n.t("config.channels.defaultName"),
-                baseUrl: config.baseUrl || defaultConfig.baseUrl,
-                apiKey: config.apiKey || "",
-                apiFormat: config.apiFormat || defaultConfig.apiFormat,
-                models: normalizeChannelModels([config.model, config.imageModel, config.videoModel, config.textModel, config.audioModel].map(modelOptionName)),
-            }),
-        );
+export function resolveModelRequestConfig(config: AiConfig, value: string, capability: ModelCapability) {
+    if (capability !== "image") throw new Error(i18n.t("config.lumivia.unsupported"));
+    const channel = lumiviaChannel;
+    if (!channel) throw new Error(i18n.t("config.lumivia.accountRequired"));
+    const selected = decodeChannelModel(value);
+    const name = selected?.model || value;
+    if ((selected && selected.channelId !== channel.id) || !channel.models.some((model) => model.name === name)) {
+        throw new Error(i18n.t("config.lumivia.unavailableModel"));
     }
-    return channels;
+    return { ...config, model: name, baseUrl: LUMIVIA_BASE_URL, apiKey: channel.apiKey, apiFormat: channel.apiFormat };
 }
 
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {

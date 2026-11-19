@@ -102,8 +102,8 @@ export default function VideoPage() {
     const processedCommandRef = useRef(0);
     const agentTaskIdRef = useRef<string | undefined>(undefined);
 
-    const model = effectiveConfig.videoModel || effectiveConfig.model;
-    const canGenerate = Boolean(prompt.trim());
+    const model = effectiveConfig.videoModel;
+    const canGenerate = Boolean(prompt.trim() && model);
 
     useEffect(() => {
         if (!running || !startedAt) return;
@@ -227,8 +227,7 @@ export default function VideoPage() {
             return null;
         }
         if (!isAiConfigReady(effectiveConfig, model)) {
-            message.warning(t("workbench.configFirst"));
-            openConfigDialog(true);
+            message.warning(t("config.lumivia.unsupported"));
             return null;
         }
         return { text, config: buildVideoConfig(effectiveConfig, model), references: [...references] };
@@ -457,6 +456,7 @@ export default function VideoPage() {
                         </div>
 
                         <div className="mt-auto pt-6">
+                            {!model && <p className="mb-2 text-xs text-stone-500 dark:text-stone-400">{t("config.lumivia.videoUnavailable")}</p>}
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
                                 {t("workbench.generate")}
                             </Button>

@@ -1,30 +1,130 @@
-import { useEffect, useState } from 'react';
-import { LogIn, LogOut } from 'lucide-react';
-import { useConfigStore, modelOptionsFromChannels, type ModelChannel } from '@/stores/use-config-store';
+import { useEffect, useRef } from "react";
+import { create } from "zustand";
+import i18n from "@/i18n";
+import { setLumiviaChannel } from "@/stores/use-config-store";
 
-type Account = { email: string; group: string; prices: Record<string, number>; models: string[] };
-const channelId = 'lumivia-image';
+const MAIN_ORIGIN = "https://api.lumivia.cn";
+const text = (key: string) => i18n.t(`config.lumivia.${key}`);
 
-function applyAccount(account: Account | null) {
-    const config = useConfigStore.getState().config;
-    const others = config.channels.filter(c => c.id !== channelId);
-    const previous = config.channels.find(c => c.id === channelId);
-    if (!account && !previous) return;
-    const channel: ModelChannel | undefined = account ? {id: channelId, name:'乐米 · '+account.group, baseUrl: location.origin+'/lumivia', apiKey:'canvas-session', apiFormat:'openai', models:account.models.map(name=>({name,capability:'image'}))} : undefined;
-    const channels = channel ? [channel, ...others] : others;
-    const models = modelOptionsFromChannels(channels);
-    const preferred = account?.models.includes('gpt-image-2') ? 'gpt-image-2' : account?.models[0];
-    const selected = previous && models.includes(config.imageModel) && config.imageModel.startsWith(channelId+'::') ? config.imageModel : preferred ? `${channelId}::${preferred}` : others.flatMap(c=>c.models.filter(m=>m.capability==='image').map(m=>`${c.id}::${m.name}`))[0] || '';
-    useConfigStore.setState({config:{...config,channels,models,channelMode:'local',imageModel:selected,model:selected,...(channel ? {proxyEnabled:false} : {})}});
+type Account = { id: number; email: string; group: string; prices: Record<string, number>; models: string[] };
+type ImageAction = "generations" | "edits";
+type Request = { action: "account" } | { action: ImageAction; challenge: string; accountId: number };
+type Reply = { status: number; account?: Account; grant?: string; error?: string };
+type Pending = { send: () => void; finish: (value: Reply) => void };
+
+let helper: Window | null = null;
+let ready = false;
+let requestId = 0;
+let syncVersion = 0;
+let accountVersion = 0;
+const pending = new Map<number, Pending>();
+
+function authorize(request: Request): Promise<Reply> {
+    return new Promise((resolve) => {
+        const id = ++requestId;
+        const timer = window.setTimeout(() => finish({ status: 503 }), 8000);
+        function finish(reply: Reply) {
+            window.clearTimeout(timer);
+            pending.delete(id);
+            resolve(reply);
+        }
+        const send = () => helper?.postMessage({ type: "lumivia:authorize", id, ...request }, MAIN_ORIGIN);
+        pending.set(id, { send, finish });
+        if (ready) send();
+    });
 }
 
-export function LumiviaAccount(){
-    const [account,setAccount]=useState<Account|null>(null);
-    const [error,setError]=useState('');
-    useEffect(()=>{let live=true; const sync=async()=>{try{const r=await fetch('/lumivia/session',{cache:'no-store'});if(!r.ok)throw Error();const data:Account|null=await r.json();if(live){applyAccount(data);setAccount(data);setError('')}}catch{if(live)setError('暂时无法连接主站')}};void sync();window.addEventListener('focus',sync);return()=>{live=false;window.removeEventListener('focus',sync)}},[]);
-    const prices=Object.entries(account?.prices || {}).map(([k,v])=>`${k.toUpperCase()} ¥${v}`).join(' · ');
-    return <div className="flex min-h-8 shrink-0 flex-wrap items-center justify-between gap-x-4 border-b border-stone-200 bg-background px-4 py-1 text-xs dark:border-stone-800" aria-label="乐米账号">
-        <span className="truncate" title={account?.email}>{account ? `${account.email} · ${account.group}` : '乐米画布'} {error && <span role="status">{error}</span>}</span>
-        <span className="flex items-center gap-3">{account ? <><span>{prices ? `${prices} / 张` : '按主站分组计费'}</span><button type="button" aria-label="退出画布账号" title="退出画布账号" onClick={async()=>{try{const r=await fetch('/lumivia/logout',{method:'POST'});if(!r.ok)throw Error();applyAccount(null);setAccount(null)}catch{setError('退出失败，请重试')}}}><LogOut size={15}/></button></> : <a className="inline-flex items-center gap-1 font-medium" target={window.top===window.self?'_self':'_blank'} rel="noopener" href="/lumivia/start"><LogIn size={15}/>用乐米账号登录</a>}</span>
-    </div>;
+export const useLumiviaAccount = create<{
+    account: Account | null;
+    error: string;
+    syncing: boolean;
+    sync: () => Promise<void>;
+}>(() => ({ account: null, error: "", syncing: true, sync: syncLumiviaAccount }));
+
+function applyAccount(account: Account | null, error = "", syncing = false) {
+    if (account?.id !== useLumiviaAccount.getState().account?.id) accountVersion++;
+    setLumiviaChannel(account);
+    useLumiviaAccount.setState({ account, error, syncing });
+}
+
+function replyError(reply: Reply) {
+    if (reply.status === 401) return text("accountRequired");
+    if (reply.status === 409) return text("accountChanged");
+    return reply.error || text("syncFailed");
+}
+
+export async function syncLumiviaAccount() {
+    const version = ++syncVersion;
+    useLumiviaAccount.setState({ syncing: true, error: "" });
+    const reply = await authorize({ action: "account" });
+    if (version !== syncVersion) return;
+    if (reply.status === 200 && reply.account) applyAccount(reply.account);
+    else applyAccount(null, replyError(reply));
+}
+
+export function lumiviaImageAccount() {
+    const account = useLumiviaAccount.getState().account;
+    if (!account) throw new Error(text("accountRequired"));
+    return { id: account.id, version: accountVersion };
+}
+
+export async function lumiviaImageHeaders(action: ImageAction, account: ReturnType<typeof lumiviaImageAccount>, signal?: AbortSignal) {
+    const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    signal?.throwIfAborted();
+    if (account.version !== accountVersion) throw new Error(text("accountChanged"));
+    const verifier = hex(crypto.getRandomValues(new Uint8Array(32)));
+    const challenge = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
+    const reply = await authorize({ action, challenge, accountId: account.id });
+    signal?.throwIfAborted();
+    if (account.version !== accountVersion) throw new Error(text("accountChanged"));
+    if (reply.status !== 200 || !reply.grant) {
+        if ([401, 403, 409].includes(reply.status)) {
+            applyAccount(null, replyError(reply), true);
+            void syncLumiviaAccount();
+        }
+        throw new Error(replyError(reply));
+    }
+    return { "X-Lumivia-Grant": reply.grant, "X-Lumivia-Verifier": verifier };
+}
+
+export function LumiviaAccount() {
+    const iframe = useRef<HTMLIFrameElement>(null);
+    useEffect(() => {
+        const frame = iframe.current;
+        if (!frame) return;
+        helper = frame.contentWindow;
+        const onMessage = (event: MessageEvent) => {
+            if (event.origin !== MAIN_ORIGIN || event.source !== helper) return;
+            const data = event.data;
+            if (data?.type === "lumivia:ready") {
+                ready = true;
+                pending.forEach((request) => request.send());
+            } else if (data?.type === "lumivia:authorization") {
+                pending.get(data.id)?.finish(data);
+            } else if (data?.type === "lumivia:account-changed") {
+                accountVersion++;
+                pending.forEach((request) => request.finish({ status: 409 }));
+                applyAccount(null, "", true);
+                void syncLumiviaAccount();
+            }
+        };
+        const onVisible = () => { if (document.visibilityState === "visible") void syncLumiviaAccount(); };
+        window.addEventListener("message", onMessage);
+        window.addEventListener("focus", syncLumiviaAccount);
+        document.addEventListener("visibilitychange", onVisible);
+        frame.src = `${MAIN_ORIGIN}/canvas-connect/`;
+        void syncLumiviaAccount();
+        return () => {
+            window.removeEventListener("message", onMessage);
+            window.removeEventListener("focus", syncLumiviaAccount);
+            document.removeEventListener("visibilitychange", onVisible);
+            helper = null;
+            ready = false;
+            syncVersion++;
+            accountVersion++;
+            pending.forEach((request) => request.finish({ status: 503 }));
+            applyAccount(null);
+        };
+    }, []);
+    return <iframe ref={iframe} title="乐米账号同步" referrerPolicy="no-referrer" hidden />;
 }

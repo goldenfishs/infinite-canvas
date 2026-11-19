@@ -1,8 +1,35 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>乐米 AI · 画布授权</title>
-<style>body{margin:0;font:16px/1.6 system-ui;color:#202723;background:#fafbf9}main{max-width:420px;margin:12vh auto;padding:24px}small{color:#53695c}h1{font-size:26px}button,a{font:inherit}button{padding:8px 18px;background:#155640;color:white;border:0;border-radius:6px;cursor:pointer}button:disabled{opacity:.6}a{color:#155640}p{overflow-wrap:anywhere}</style>
-<main><small>乐米 AI / 账号授权</small><h1>连接乐米画布</h1><p id="account" role="status">正在确认乐米账号…</p><p>允许画布使用你账号的生图分组。生成和编辑图片将计入你的主站用量。</p><button id="approve" disabled>授权并进入画布</button> <a href="/login" target="_blank" rel="noopener" id="login" hidden>登录乐米账号</a></main>
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>乐米画布账号同步</title>
 <script nonce="SCRIPT_NONCE">
-const state=location.hash.slice(1), label=document.querySelector('#account'), button=document.querySelector('#approve'), login=document.querySelector('#login');
-async function check(){button.disabled=true;if(!/^[a-f0-9]{64}$/.test(state)){label.textContent='请从乐米画布重新进入。';return}try{const token=localStorage.getItem('auth_token');if(!token)throw 0;const r=await fetch('/api/v1/auth/me',{headers:{Authorization:'Bearer '+token},cache:'no-store'});const user=(await r.json()).data;if(!r.ok||!user?.email)throw 0;label.textContent='当前账号：'+user.email;login.hidden=true;button.disabled=false}catch{login.hidden=false;label.textContent='请先登录主站，然后回到此页继续授权。'}}
-button.onclick=async()=>{button.disabled=true;try{const r=await fetch('/canvas-connect/approve',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+localStorage.getItem('auth_token')},body:JSON.stringify({state})});const d=await r.json();if(!r.ok||!d.next)throw Error(d.error?.message||'授权失败，请重新登录后再试');location.replace(d.next)}catch(e){label.textContent=e.message;button.disabled=false}};
-window.addEventListener('focus',check);check();</script></html>
+const canvas = 'https://canvas.lumivia.cn';
+const send = (data) => window.parent.postMessage(data, canvas);
+const token = () => localStorage.getItem('auth_token');
+
+window.addEventListener('storage', (event) => {
+    if (event.key === 'auth_token' || event.key === null) send({ type: 'lumivia:account-changed' });
+});
+window.addEventListener('message', async (event) => {
+    const request = event.data;
+    if (window.parent === window || event.source !== window.parent || event.origin !== canvas || request?.type !== 'lumivia:authorize') return;
+    const reply = (data) => send({ type: 'lumivia:authorization', id: request.id, ...data });
+    try {
+        const current = token();
+        if (!current) return reply({ status: 401 });
+        const response = await fetch('/canvas-connect/approve', {
+            method: 'POST', cache: 'no-store',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${current}` },
+            body: JSON.stringify({ action: request.action, challenge: request.challenge, account_id: request.accountId }),
+        });
+        const body = await response.json();
+        // A request begun before switching accounts cannot return a usable grant.
+        if (current !== token()) return reply({ status: 409 });
+        reply({ status: response.status, account: body.account, grant: body.grant, error: body.error?.message });
+    } catch {
+        reply({ status: 503 });
+    }
+});
+if (window.parent !== window) send({ type: 'lumivia:ready' });
+</script>
+</html>

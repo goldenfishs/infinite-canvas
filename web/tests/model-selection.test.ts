@@ -4,21 +4,23 @@ import type { CanvasNodeData } from "../src/types/canvas";
 
 // Config and i18n use browser storage during module initialization.
 const values = new Map<string, string>();
-const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    value: {
-        getItem: (key: string) => values.get(key) ?? null,
-        setItem: (key: string, value: string) => values.set(key, value),
-        removeItem: (key: string) => values.delete(key),
-    },
-});
+const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key),
+};
+const globals = { localStorage: storage, window: { localStorage: storage } };
+const original = Object.getOwnPropertyDescriptors(globalThis);
+for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
 afterAll(() => {
-    if (originalStorage) Object.defineProperty(globalThis, "localStorage", originalStorage);
-    else Reflect.deleteProperty(globalThis, "localStorage");
+    for (const key of Object.keys(globals)) {
+        if (original[key]) Object.defineProperty(globalThis, key, original[key]);
+        else Reflect.deleteProperty(globalThis, key);
+    }
 });
 
-const { defaultConfig, resolveModelForCapability, useConfigStore } = await import("../src/stores/use-config-store");
+const { CONFIG_STORE_KEY, defaultConfig, resolveModelForCapability, resolveModelRequestConfig, resolveModelScript, setLumiviaChannel, useConfigStore } = await import("../src/stores/use-config-store");
+const { importAppConfig } = await import("../src/services/config-file");
 const { buildGenerationConfig } = await import("../src/lib/canvas/canvas-generation-helpers");
 const { CanvasNodeType } = await import("../src/types/canvas");
 
@@ -97,4 +99,49 @@ test("unavailable explicit selections are preserved for every generation capabil
     for (const capability of ["image", "video", "text", "audio"] as ModelCapability[]) {
         expect(resolveModelForCapability(config, `removed::${capability}`, capability)).toBe(`removed::${capability}`);
     }
+});
+
+
+test("saved external providers and keys cannot participate before the main account is validated", async () => {
+    values.set(CONFIG_STORE_KEY, JSON.stringify({ state: { config: { ...config, count: "2", proxyEnabled: true, apiKey: "saved-key" } }, version: 0 }));
+    await useConfigStore.persist.rehydrate();
+    const hydrated = useConfigStore.getState().config;
+    expect(hydrated.channels).toEqual([]);
+    expect(hydrated.apiKey).toBe("");
+    expect(hydrated.proxyEnabled).toBe(false);
+    expect(hydrated.count).toBe("2");
+    expect(() => resolveModelRequestConfig(config, "replacement::image-a", "image")).toThrow();
+});
+
+test("imported credentials and scripts cannot replace the current account's image provider", async () => {
+    const file = new File([JSON.stringify({
+        app: "infinite-canvas",
+        version: 1,
+        config: {
+            ...config,
+            channels: [{ ...config.channels[0], id: "lumivia-image", models: [{ name: "gpt-image-2", capability: "image", script: "injected" }] }],
+            imageModel: "lumivia-image::gpt-image-2",
+            proxyEnabled: true,
+        },
+        webdav: { url: "https://example.test/dav" },
+        promptSources: { sources: [], schedule: { intervalMinutes: 30, lastFetchedAt: "" } },
+    })], "config.json");
+    setLumiviaChannel({ group: "生图", models: ["gpt-image-2"] });
+    try {
+        await importAppConfig(file);
+        const managed = useConfigStore.getState().config;
+        expect(managed.imageModel).toBe("lumivia-image::gpt-image-2");
+        expect(managed.channels).toHaveLength(1);
+        expect(resolveModelScript(managed, managed.imageModel)).toBe("");
+        expect(resolveModelRequestConfig(managed, managed.imageModel, "image").baseUrl).toBe("/lumivia");
+        expect(() => resolveModelRequestConfig(managed, managed.imageModel, "video")).toThrow();
+        expect(() => resolveModelRequestConfig(managed, "replacement::gpt-image-2", "image")).toThrow();
+        expect(useConfigStore.getState().webdav.url).toBe("https://example.test/dav");
+        const saved = JSON.parse(values.get(CONFIG_STORE_KEY) || "{}").state.config;
+        expect(saved.channels).toEqual([]);
+        expect(saved.apiKey).toBe("");
+    } finally {
+        setLumiviaChannel(null);
+    }
+    expect(() => resolveModelRequestConfig(config, "lumivia-image::gpt-image-2", "image")).toThrow();
 });

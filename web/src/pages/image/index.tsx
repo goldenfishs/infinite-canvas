@@ -7,6 +7,7 @@ import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
 import { ModelPicker } from "@/components/model-picker";
+import { useLumiviaAccount } from "@/components/layout/lumivia-account";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -102,7 +103,9 @@ export default function ImagePage() {
     const agentTaskIdRef = useRef<string | undefined>(undefined);
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
-    const canGenerate = Boolean(prompt.trim());
+    const checkingAccount = useLumiviaAccount((state) => !state.account && state.syncing);
+    const accountError = useLumiviaAccount((state) => state.error);
+    const canGenerate = Boolean(prompt.trim()) && isAiConfigReady(effectiveConfig, model);
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
 
     useEffect(() => {
@@ -485,8 +488,9 @@ export default function ImagePage() {
 
                         <div className="mt-auto pt-6">
                             <Button type="primary" size="large" block icon={<Sparkles className="size-4" />} loading={running} disabled={!canGenerate || running} onClick={() => void generate()}>
-                                {t("workbench.generate")}
+                                {checkingAccount ? t("config.lumivia.checking") : t("workbench.generate")}
                             </Button>
+                            {accountError && <p role="status" className="mt-2 text-sm text-stone-500">{accountError}</p>}
                         </div>
                     </div>
 

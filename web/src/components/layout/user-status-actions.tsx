@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { Tooltip } from "antd";
-import { BookOpen, Keyboard, Puzzle, Settings2 } from "lucide-react";
+import { BookOpen, House, Keyboard, Puzzle, Settings2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
@@ -37,6 +37,10 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
 
     return (
         <div className="inline-flex shrink-0 items-center gap-1">
+            <a href="https://api.lumivia.cn/dashboard" target="_top" referrerPolicy="no-referrer" className={`${naturalIconClass} sm:w-auto sm:gap-1.5 sm:px-2`} style={iconStyle} aria-label={t("topNav.backToLumivia")} title={t("topNav.backToLumivia")}>
+                <House className="size-4" />
+                <span className="hidden whitespace-nowrap text-xs sm:inline">{t("topNav.backToLumivia")}</span>
+            </a>
             {onOpenPlugins ? (
                 <button type="button" className={naturalIconClass} style={iconStyle} onClick={onOpenPlugins} aria-label={t("topNav.plugins")} title={t("topNav.plugins")}>
                     <Puzzle className="size-4" />
