@@ -162,6 +162,11 @@ export default {
         retrySuccess: "重试成功",
     },
     imageWorkbench: {
+        save_pending: "正在保存到本机；可以先下载图片。",
+        save_failed: "本机历史未保存，请在离开前下载。",
+        save_links: "仅保存了原图链接，可能过期，请及时下载。",
+        historyDeleteFailed: "本机历史删除失败。",
+        previewUnavailable: "已收到图片，但预览加载失败；可尝试下载原图。",
         title: "生图工作台",
         promptPlaceholder: "描述画面主体、风格、构图、光线和用途",
         references: "参考图",

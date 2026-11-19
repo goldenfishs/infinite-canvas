@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -346,11 +347,27 @@ async def relay(req, path, secret, *, body=None):
                 "X-Content-Type-Options": "nosniff",
             },
         )
-        await out.prepare(req)
-        async for chunk in r.content.iter_any():
-            await out.write(chunk)
-        await out.write_eof()
-        return out
+        # Link image transfer diagnostics to the Sub2 usage row without logging content or keys.
+        image = path.startswith("/v1/images/")
+        rid = r.headers.get("X-Client-Request-ID", "")
+        rid = rid if re.fullmatch(r"[a-fA-F0-9-]{36}", rid) else "unknown"
+        if image and rid != "unknown":
+            out.headers["X-Client-Request-ID"] = rid
+        sent, complete = 0, False
+        try:
+            await out.prepare(req)
+            async for chunk in r.content.iter_any():
+                await out.write(chunk)
+                sent += len(chunk)
+            await out.write_eof()
+            complete = True
+            return out
+        finally:
+            if image:
+                logging.getLogger("canvas.images").info(
+                    "image_relay request=%s status=%d forwarded_bytes=%d complete=%s",
+                    rid, r.status, sent, complete,
+                )
 
 
 @routes.post("/lumivia/v1/images/{action:generations|edits}")
@@ -410,6 +427,8 @@ async def lifecycle(app):
 
 
 if __name__ == "__main__":
+    logging.basicConfig()
+    logging.getLogger("canvas.images").setLevel(logging.INFO)
     app = web.Application(middlewares=[protect], client_max_size=32 * 1024 * 1024)
     app.cleanup_ctx.append(lifecycle)
     app.add_routes(routes)

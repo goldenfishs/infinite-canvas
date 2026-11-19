@@ -15,9 +15,9 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
-import { formatBytes, formatDuration } from "@/lib/image-utils";
+import { formatBytes, formatDuration, getDataUrlByteSize } from "@/lib/image-utils";
 import { requestEdit, requestGeneration } from "@/services/api/image";
-import { deleteStoredImages, ensureImagePreview, getImagePreviewRevision, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
+import { deleteStoredImages, ensureImagePreview, getImagePreviewRevision, imageToDataUrl, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import type { ReferenceImage } from "@/types/image";
@@ -58,13 +58,14 @@ type GenerationLog = {
     quality: string;
     status: "success" | "failed";
     images: GeneratedImage[];
+    localSave?: "pending" | "failed" | "links";
 };
 
 type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
-const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
+const LOCAL_SAVE_NOTICE_MS = 12_000;
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
 
@@ -85,6 +86,8 @@ export default function ImagePage() {
     const [results, setResults] = useState<GenerationResult[]>([]);
     const [logs, setLogs] = useState<GenerationLog[]>([]);
     const [running, setRunning] = useState(false);
+    const busy = useRef(false);
+    const removedLogs = useRef(new Set<string>());
     const [logsOpen, setLogsOpen] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [promptDialogOpen, setPromptDialogOpen] = useState(false);
@@ -115,7 +118,11 @@ export default function ImagePage() {
     }, [running, startedAt]);
 
     useEffect(() => {
-        void refreshLogs();
+        let mounted = true;
+        void readStoredLogs().then((saved) => {
+            if (mounted) setLogs((current) => [...current, ...saved.filter((log) => !removedLogs.current.has(log.id) && !current.some((item) => item.id === log.id))]);
+        });
+        return () => { mounted = false; };
     }, []);
 
     const addReferences = async (files?: FileList | null) => {
@@ -153,6 +160,10 @@ export default function ImagePage() {
     const generate = async () => {
         const agentTaskId = agentTaskIdRef.current;
         agentTaskIdRef.current = undefined;
+        if (busy.current) {
+            if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", error: t("imageWorkbench.busy") });
+            return;
+        }
         const text = prompt.trim();
         if (!text) {
             message.error(t("imageWorkbench.promptRequired"));
@@ -172,20 +183,22 @@ export default function ImagePage() {
             return;
         }
 
+        busy.current = true;
         setElapsedMs(0);
         setRunning(true);
         if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: undefined });
         setPreviewLog(null);
-        setResults(Array.from({ length: generationCount }, () => ({ id: nanoid(), status: "pending" })));
+        const slots = Array.from({ length: generationCount }, () => ({ id: nanoid(), status: "pending" as const }));
+        setResults(slots);
         const batchStartedAt = performance.now();
         setStartedAt(batchStartedAt);
 
-        const tasks = Array.from({ length: generationCount }, (_, index) => runGenerationSlot(index, snapshot));
+        const tasks = slots.map((slot) => runGenerationSlot(slot.id, snapshot));
 
         const result = await Promise.allSettled(tasks);
-        const successImages = result.filter((item): item is PromiseFulfilledResult<GeneratedImage> => item.status === "fulfilled").map((item) => item.value);
+        const successImages = result.flatMap((item) => item.status === "fulfilled" ? item.value : []);
         const successCount = successImages.length;
-        const failCount = generationCount - successCount;
+        const failCount = result.filter((item) => item.status === "rejected").length;
         const failed = result.find((item): item is PromiseRejectedResult => item.status === "rejected");
         const error = failed?.reason instanceof Error ? failed.reason.message : failCount ? t("workbench.generationFailed") : undefined;
         if (agentTaskId) updateAgentTask(agentTaskId, { status: successCount ? "succeeded" : "failed", successCount, failCount, error: successCount ? undefined : error });
@@ -206,6 +219,7 @@ export default function ImagePage() {
             );
             successCount ? message.success(t("imageWorkbench.generated")) : message.error(failed?.reason instanceof Error ? failed.reason.message : t("workbench.generationFailed"));
         } finally {
+            busy.current = false;
             setRunning(false);
         }
     };
@@ -233,7 +247,14 @@ export default function ImagePage() {
     }, [autoRunToken]);
 
     const downloadImage = (image: GeneratedImage, index: number) => {
-        saveAs(image.dataUrl, `image-${index + 1}.png`);
+        if (image.dataUrl.startsWith("data:")) {
+            const link = document.createElement("a");
+            link.href = image.dataUrl;
+            link.download = `image-${index + 1}.png`;
+            link.click();
+        } else {
+            saveAs(image.dataUrl, `image-${index + 1}.png`);
+        }
     };
 
     const addResultToReferences = async (image: GeneratedImage, index: number) => {
@@ -280,7 +301,10 @@ export default function ImagePage() {
 
     const deleteSelectedLogs = () => {
         const imageKeys = logs.filter((log) => selectedLogIds.includes(log.id)).flatMap((log) => log.images.map((image) => image.storageKey).filter((key): key is string => Boolean(key)));
-        void Promise.all([deleteStoredImages(imageKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(refreshLogs);
+        const ids = new Set(selectedLogIds);
+        setLogs((current) => current.filter((log) => !ids.has(log.id)));
+        for (const id of ids) removedLogs.current.add(id);
+        void Promise.all([deleteStoredImages(imageKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).catch(() => message.warning(t("imageWorkbench.historyDeleteFailed")));
         if (previewLog && selectedLogIds.includes(previewLog.id)) {
             setPreviewLog(null);
             setResults([]);
@@ -290,10 +314,24 @@ export default function ImagePage() {
     };
 
     const saveLog = (log: GenerationLog) => {
-        void logStore.setItem(log.id, serializeLog(log)).then(refreshLogs);
+        setLogs((current) => [log, ...current]);
+        const status = (localSave?: GenerationLog["localSave"]) => setLogs((current) => current.map((item) => item.id === log.id ? { ...item, localSave } : item));
+        const notice = window.setTimeout(() => status("pending"), LOCAL_SAVE_NOTICE_MS);
+        // Inline responses are already self-contained; preserve them even when image/preview storage is blocked.
+        // For URL-only providers, try to archive the bytes while the signed URL is still valid.
+        void (async () => {
+            const archived = await Promise.all(log.images.map(async (image) => {
+                if (image.storageKey || image.dataUrl.startsWith("data:")) return image;
+                try {
+                    return { ...image, dataUrl: await imageToDataUrl(image, { signal: AbortSignal.timeout(30_000) }) };
+                } catch { return image; }
+            }));
+            if (removedLogs.current.has(log.id)) return;
+            const localSave = archived.some((image) => !image.storageKey && !image.dataUrl.startsWith("data:")) ? "links" as const : undefined;
+            await logStore.setItem(log.id, serializeLog({ ...log, images: archived, localSave }));
+            status(localSave);
+        })().catch(() => status("failed")).finally(() => window.clearTimeout(notice));
     };
-
-    const refreshLogs = async () => setLogs(await readStoredLogs());
 
     const previewGenerationLog = async (log: GenerationLog) => {
         setPreviewLog(log);
@@ -321,46 +359,46 @@ export default function ImagePage() {
         return { text, config: { ...effectiveConfig, model, count: "1" }, references: [...references] };
     };
 
-    const runGenerationSlot = async (index: number, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }) => {
+    const runGenerationSlot = async (slotId: string, snapshot: { text: string; config: AiConfig; references: ReferenceImage[] }) => {
         const itemStartedAt = performance.now();
         try {
             const result = snapshot.references.length ? await requestEdit(snapshot.config, snapshot.text, snapshot.references) : await requestGeneration(snapshot.config, snapshot.text);
-            const image = result[0];
-            if (!image) throw new Error(t("imageWorkbench.missingResult"));
-            const stored = await uploadImage(image.dataUrl);
-            const nextImage: GeneratedImage = { id: image.id, dataUrl: stored.url, ...(stored.storageKey ? { storageKey: stored.storageKey } : {}), durationMs: performance.now() - itemStartedAt, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType };
-            setResults((value) => updateResultAt(value, index, { status: "success", image: nextImage }));
-            return nextImage;
+            const durationMs = performance.now() - itemStartedAt;
+            const images: GeneratedImage[] = result.filter(({ dataUrl }) => /^https?:\/\/|^data:image\/(?:png|jpeg|webp|gif|avif);base64,/i.test(dataUrl)).map(({ id, dataUrl }) => ({
+                id, dataUrl, durationMs, width: 0, height: 0, bytes: dataUrl.startsWith("data:") ? getDataUrlByteSize(dataUrl) : 0,
+            }));
+            if (!images.length) throw new Error(t("imageWorkbench.missingResult"));
+            setResults((value) => value.flatMap((slot) => slot.id === slotId ? images.map((image) => ({ id: image.id, status: "success" as const, image })) : [slot]));
+            return images;
         } catch (error) {
-            setResults((value) => updateResultAt(value, index, { status: "failed", error: error instanceof Error ? error.message : t("workbench.generationFailed") }));
+            setResults((value) => value.map((slot) => slot.id === slotId ? { ...slot, status: "failed", error: error instanceof Error ? error.message : t("workbench.generationFailed") } : slot));
             throw error;
         }
     };
 
-    const retryResult = async (index: number) => {
+    const retryResult = async (slotId: string) => {
+        if (busy.current) return;
         const snapshot = buildRequestSnapshot();
         if (!snapshot) return;
+        busy.current = true;
+        setRunning(true);
         setPreviewLog(null);
-        setResults((value) => updateResultAt(value, index, { status: "pending", error: undefined, image: undefined }));
+        setResults((value) => value.map((slot) => slot.id === slotId ? { id: slotId, status: "pending" } : slot));
         const retryStartedAt = performance.now();
+        setStartedAt(retryStartedAt);
+        setElapsedMs(0);
+        let images: GeneratedImage[] = [];
         try {
-            const image = await runGenerationSlot(index, snapshot);
-            saveLog(
-                buildLog({
-                    prompt: snapshot.text,
-                    model,
-                    config: { ...snapshot.config, count: "1" },
-                    references: snapshot.references,
-                    durationMs: performance.now() - retryStartedAt,
-                    successCount: 1,
-                    failCount: 0,
-                    status: "success",
-                    images: [image],
-                }),
-            );
+            images = await runGenerationSlot(slotId, snapshot);
             message.success(t("workbench.retrySuccess"));
         } catch {
-            // runGenerationSlot has already marked the result as failed.
+            // The slot already displays the request failure. Only a manual retry may regenerate it.
+        } finally {
+            busy.current = false;
+            setRunning(false);
+            saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references,
+                durationMs: performance.now() - retryStartedAt, successCount: images.length, failCount: images.length ? 0 : 1,
+                status: images.length ? "success" : "failed", images }));
         }
     };
 
@@ -507,7 +545,7 @@ export default function ImagePage() {
                                     result.status === "success" && result.image ? (
                                         <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
                                     ) : result.status === "failed" ? (
-                                        <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
+                                        <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} disabled={running} onRetry={() => retryResult(result.id)} />
                                     ) : (
                                         <PendingImageCard key={result.id} />
                                     ),
@@ -590,13 +628,16 @@ function ResultImageCard({
 }) {
     const { t } = useTranslation();
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
+    const [dimensions, setDimensions] = useState("");
+    const [failed, setFailed] = useState(false);
     return (
         <div className="overflow-hidden rounded-lg border border-stone-200 bg-background dark:border-stone-800">
-            <Image src={previewUrlFor(image.storageKey) || image.dataUrl} preview={{ src: image.dataUrl }} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
+            <Image src={previewUrlFor(image.storageKey) || image.dataUrl} preview={{ src: image.dataUrl }} onLoad={(event) => { const img = event.currentTarget; setFailed(false); setDimensions(`${img.naturalWidth}x${img.naturalHeight}`); }} onError={() => setFailed(true)} alt={t("imageWorkbench.resultAlt", { count: index + 1 })} className="aspect-square object-cover" />
             <div className="space-y-2 border-t border-stone-200 px-3 py-2.5 dark:border-stone-800">
+                {failed && <div className="text-xs text-amber-600 dark:text-amber-400">{t("imageWorkbench.previewUnavailable")}</div>}
                 <div className="flex min-w-0 gap-x-2 gap-y-1 text-xs text-stone-500 dark:text-stone-400">
                     <span>
-                        {image.width}x{image.height}
+                        {image.width && image.height ? `${image.width}x${image.height}` : dimensions}
                     </span>
                     <span>{formatBytes(image.bytes)}</span>
                     <span>{formatDuration(image.durationMs)}</span>
@@ -642,7 +683,7 @@ function PendingImageCard() {
     );
 }
 
-function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => void }) {
+function FailedImageCard({ error, onRetry, disabled }: { error: string; onRetry: () => void; disabled: boolean }) {
     const { t } = useTranslation();
     return (
         <div className="overflow-hidden rounded-lg border border-red-200 bg-red-50 dark:border-red-950 dark:bg-red-950/20">
@@ -653,16 +694,12 @@ function FailedImageCard({ error, onRetry }: { error: string; onRetry: () => voi
                 </Typography.Paragraph>
             </div>
             <div className="flex justify-end border-t border-red-200 p-3 dark:border-red-950">
-                <Button size="small" danger onClick={onRetry}>
+                <Button size="small" danger disabled={disabled} onClick={onRetry}>
                     {t("workbench.retry")}
                 </Button>
             </div>
         </div>
     );
-}
-
-function updateResultAt(results: GenerationResult[], index: number, next: Partial<GenerationResult>) {
-    return results.map((item, itemIndex) => (itemIndex === index ? { ...item, ...next } : item));
 }
 
 function LogPanel({
@@ -738,6 +775,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                     <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
                     <div className="min-w-0">
                         <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
+                        {log.localSave && <span className="text-xs text-amber-600 dark:text-amber-400">{t(`imageWorkbench.save_${log.localSave}`)}</span>}
                         {thumbnails.length ? (
                             <div className="mt-2 flex gap-1 overflow-hidden">
                                 {thumbnails.map((image) => (
@@ -817,7 +855,7 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         size: log.size || config.size || "",
         quality: log.quality || config.quality || "",
         status: log.status || "success",
-        images,
+        images, localSave: log.localSave,
     };
 }
 
@@ -897,7 +935,7 @@ function buildLog({
         durationMs,
         successCount,
         failCount,
-        imageCount: Number(logConfig.count) || successCount,
+        imageCount: successCount + failCount,
         size: logConfig.size,
         quality: logConfig.quality,
         status,

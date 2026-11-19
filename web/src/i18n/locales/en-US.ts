@@ -162,6 +162,11 @@ export default {
         retrySuccess: "Retry succeeded",
     },
     imageWorkbench: {
+        save_pending: "Saving locally; you can download the images now.",
+        save_failed: "Could not save local history. Download before leaving.",
+        save_links: "Only the image link was saved. Download it before it expires.",
+        historyDeleteFailed: "Could not delete local history.",
+        previewUnavailable: "Image received, but the preview did not load. Try downloading the original.",
         title: "Image Studio",
         promptPlaceholder: "Describe the subject, style, composition, lighting, and intended use",
         references: "Reference images",
