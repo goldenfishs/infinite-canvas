@@ -4,6 +4,7 @@ import i18n from "@/i18n";
 import { lumiviaImageAccount, lumiviaImageHeaders } from "@/components/layout/lumivia-account";
 import { buildApiUrl, resolveModelRequestConfig, resolveModelScript, withLocalProxy, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { normalizePluginImages, runModelPlugin } from "./model-plugin";
+import { requestLumiviaChat } from "./lumivia-chat";
 import { nanoid } from "nanoid";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
@@ -437,21 +438,12 @@ function consumeResponseStreamBlock(block: string, state: ResponseStreamState, o
         .trim();
     if (!data || data === "[DONE]") return;
     const event = JSON.parse(data) as Record<string, unknown>;
-    const type = stringValue(event.type);
-    const errorMessage = responseErrorMessage(event);
-    if (errorMessage) state.error = errorMessage;
-    if (type === "response.output_text.delta" && typeof event.delta === "string") {
-        state.text += event.delta;
+    const error = responseErrorMessage(event);
+    if (error) throw new Error(error);
+    const delta = Array.isArray(event.choices) ? event.choices[0]?.delta?.content : undefined;
+    if (typeof delta === "string") {
+        state.text += delta;
         onDelta?.(state.text);
-    }
-    if (type === "response.output_text.done" && !state.text && typeof event.text === "string") {
-        state.text = event.text;
-        onDelta?.(state.text);
-    }
-    if (type === "response.completed" && isRecord(event.response)) {
-        state.payload = event.response as ResponseApiPayload;
-    } else if (Array.isArray(event.output)) {
-        state.payload = event as ResponseApiPayload;
     }
 }
 
@@ -470,20 +462,17 @@ function consumeResponseStreamText(state: ResponseStreamState, text: string, onD
     }
 }
 
-async function requestStreamingResponse(config: AiConfig, body: Record<string, unknown>, onDelta?: (text: string) => void, options?: RequestOptions): Promise<ToolResponseResult> {
-    const response = await fetch(aiApiUrl(config, "/responses"), {
-        method: "POST",
-        headers: { ...aiHeaders(config, "application/json"), Accept: "text/event-stream" },
-        body: JSON.stringify({ ...body, stream: true }),
-        signal: options?.signal,
-    });
+async function readChatText(response: Response, onDelta: (text: string) => void) {
     if (!response.ok) throw new Error(await readFetchError(response, apiText("requestFailed")));
-    if (!response.body) {
-        const payload = (await response.json()) as ResponseApiPayload;
-        validateResponsePayload(payload);
-        return parseToolResponse(payload);
+    if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+        const payload = await response.json();
+        if (payload.error) throw new Error(payload.error.message || apiText("requestFailed"));
+        const answer = payload.choices?.[0]?.message?.content;
+        if (typeof answer !== "string" || !answer.trim()) throw new Error(apiText("noContent"));
+        onDelta(answer);
+        return answer;
     }
-
+    if (!response.body) throw new Error(apiText("noContent"));
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const state: ResponseStreamState = { buffer: "", text: "" };
@@ -491,14 +480,10 @@ async function requestStreamingResponse(config: AiConfig, body: Record<string, u
         const { done, value } = await reader.read();
         if (done) break;
         consumeResponseStreamText(state, decoder.decode(value, { stream: true }), onDelta);
-        if (state.error) throw new Error(state.error);
     }
     consumeResponseStreamText(state, decoder.decode(), onDelta, true);
-    if (state.error) throw new Error(state.error);
-    if (!state.payload) return { content: state.text, toolCalls: [] };
-    validateResponsePayload(state.payload);
-    const result = parseToolResponse(state.payload);
-    return { ...result, content: state.text || result.content };
+    if (!state.text.trim()) throw new Error(apiText("noContent"));
+    return state.text;
 }
 
 function toGeminiBody(config: AiConfig, messages: ResponseInputMessage[], extra?: Record<string, unknown>) {
@@ -822,41 +807,13 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
 }
 
 export async function requestImageQuestion(config: AiConfig, messages: AiTextMessage[], onDelta: (text: string) => void, options?: RequestOptions) {
-    const requestConfig = resolveModelRequestConfig(config, config.model || config.textModel, "text");
-    const script = resolveModelScript(config, config.model || config.textModel);
-    if (script) {
-        try {
-            const answer = await runModelPlugin<string>({
-                capability: "text",
-                script,
-                config: requestConfig,
-                messages: withSystemMessage(requestConfig, messages),
-                signal: options?.signal,
-                onDelta,
-            });
-            const text = String(answer ?? "").trim() || apiText("noContent");
-            if (text === apiText("noContent")) onDelta(text);
-            return text;
-        } catch (error) {
-            throw new Error(readAxiosError(error, apiText("requestFailed")));
-        }
-    }
-    try {
-        if (requestConfig.apiFormat === "gemini") {
-            const answer = (await requestGeminiStreamingResponse(requestConfig, toGeminiBody(requestConfig, messages), onDelta, options)).content || apiText("noContent");
-            if (answer === apiText("noContent")) onDelta(answer);
-            return answer;
-        }
-        const answer = (await requestStreamingResponse(requestConfig, {
-            model: requestConfig.model,
-            input: toResponseInput(withSystemMessage(requestConfig, messages)),
-            ...(requestConfig.reasoningEffort === "auto" ? {} : { reasoning: { effort: requestConfig.reasoningEffort } }),
-        }, onDelta, options)).content || apiText("noContent");
-        if (answer === apiText("noContent")) onDelta(answer);
-        return answer;
-    } catch (error) {
-        throw new Error(readAxiosError(error, apiText("requestFailed")));
-    }
+    const selected = config.model || config.textModel;
+    const response = await requestLumiviaChat(config, selected, {
+        messages: withSystemMessage(config, messages),
+        stream: true,
+        ...(config.reasoningEffort === "auto" ? {} : { reasoning_effort: config.reasoningEffort }),
+    }, options?.signal);
+    return readChatText(response, onDelta);
 }
 
 export async function fetchImageModels(config: Pick<AiConfig, "baseUrl" | "apiKey" | "apiFormat">) {

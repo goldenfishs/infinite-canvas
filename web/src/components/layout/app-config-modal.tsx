@@ -1,6 +1,6 @@
 import { App, Button, Form, Input, Modal, Progress, Radio, Select, Switch, Tabs } from "antd";
 import type { TFunction } from "i18next";
-import { Cloud, Download, Images, RefreshCw, Upload, Wifi } from "lucide-react";
+import { Cloud, Download, Images, MessageSquare, RefreshCw, Upload, Wifi } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -160,7 +160,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         {t("config.lumivia.sync")}
                                     </Button>
                                 </div>
-                                {account && (
+                                {account?.group && (
                                     <div className="flex items-start gap-3 rounded-xl border border-stone-200 px-4 py-3 dark:border-stone-800">
                                         <span className="mt-0.5 rounded-md bg-stone-100 p-2 dark:bg-stone-800"><Images className="size-4" /></span>
                                         <div className="min-w-0">
@@ -171,6 +171,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                             <div className="mt-1 text-xs text-stone-500 dark:text-stone-400">
                                                 {account.group} · {t("config.channels.modelCount", { count: account.models.length })} · {t("config.lumivia.keyManaged")}
                                             </div>
+                                            {account.imageWarning && <p role="status" className="mt-1 text-xs text-amber-600">{account.imageWarning}</p>}
                                             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs tabular-nums">
                                                 {Object.entries(account.prices).map(([size, price]) => (
                                                     <span key={size}>{size.toUpperCase()} {t("config.lumivia.pricePerImage", { price: price.toFixed(6).replace(/0+$/, "").replace(/\.$/, "") })}</span>
@@ -179,6 +180,17 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                                         </div>
                                     </div>
                                 )}
+                                {account && <div className="rounded-xl border px-4 py-3">
+                                    <h3 className="flex items-center gap-2 text-sm font-semibold"><MessageSquare className="size-4" />{t("config.lumivia.chatChannels")}</h3>
+                                    <p className="mt-1 text-xs text-muted-foreground">{t(account.chatChannels?.length ? "config.lumivia.chatBilling" : "config.lumivia.noChat")}</p>
+                                    <ul className="mt-2 divide-y text-sm">
+                                        {account.chatChannels?.map((channel) => <li key={channel.id} className="flex justify-between gap-3 py-2"><span className="break-all">{channel.name}</span><span className="shrink-0 text-muted-foreground">{t("config.channels.modelCount", { count: channel.models.length })}</span></li>)}
+                                    </ul>
+                                    <div className="mt-2 flex gap-4 text-xs text-teal-700 dark:text-teal-300">
+                                        <a href="https://api.lumivia.cn/keys" target="_blank" rel="noopener noreferrer">{t("config.lumivia.myKeys")}</a>
+                                        <a href="https://api.lumivia.cn/usage" target="_blank" rel="noopener noreferrer">{t("config.lumivia.usage")}</a>
+                                    </div>
+                                </div>}
                             </section>
                         ),
                     },
@@ -189,6 +201,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                             <Form layout="vertical" requiredMark={false}>
                                 <div className="mb-2 text-sm font-semibold">{t("config.preferences.defaultModels")}</div>
                                 <div className="mb-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                                    <Form.Item label={t("config.preferences.defaultTextModel")} className="mb-0">
+                                        <ModelPicker config={config} value={config.textModel} onChange={(model) => updateConfig("textModel", model)} capability="text" fullWidth />
+                                    </Form.Item>
                                     <Form.Item label={t("config.preferences.defaultImageModel")} className="mb-0">
                                         <ModelPicker config={config} value={config.imageModel} onChange={(model) => updateConfig("imageModel", model)} capability="image" fullWidth />
                                     </Form.Item>

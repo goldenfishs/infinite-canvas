@@ -145,3 +145,26 @@ test("imported credentials and scripts cannot replace the current account's imag
     }
     expect(() => resolveModelRequestConfig(config, "lumivia-image::gpt-image-2", "image")).toThrow();
 });
+
+test("chat selections are scoped to a key, including after a revocation or account switch", () => {
+    const image = { group: "生图", models: ["gpt-image-2"] };
+    const first = { id: "chat-101", name: "个人 · 标准", models: ["shared"] };
+    const second = { id: "chat-102", name: "工作 · 快速", models: ["shared"] };
+    try {
+        setLumiviaChannel({ ...image, chatChannels: [first, second] });
+        const initial = useConfigStore.getState().config;
+        expect(initial.textModel).toBe("chat-101::shared");
+        expect(initial.imageModel).toBe("lumivia-image::gpt-image-2");
+        expect(() => resolveModelRequestConfig(initial, "shared", "text")).toThrow();
+        useConfigStore.getState().updateConfig("textModel", "chat-102::shared");
+        setLumiviaChannel({ ...image, chatChannels: [first, second] });
+        const selected = useConfigStore.getState().config;
+        expect(resolveModelRequestConfig(selected, selected.textModel, "text").channelId).toBe(second.id);
+        expect(() => resolveModelRequestConfig(selected, selected.textModel, "image")).toThrow();
+        setLumiviaChannel({ ...image, chatChannels: [first] });
+        expect(() => resolveModelRequestConfig(selected, selected.textModel, "text")).toThrow();
+        expect(useConfigStore.getState().config.channels.map((c) => c.id)).not.toContain(second.id);
+    } finally { setLumiviaChannel(null); }
+    expect(useConfigStore.getState().config.textModel).toBe("");
+    expect(() => resolveModelRequestConfig(config, "chat-101::shared", "text")).toThrow();
+});

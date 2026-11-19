@@ -1,14 +1,15 @@
 import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import i18n from "@/i18n";
-import { setLumiviaChannel } from "@/stores/use-config-store";
+import { setLumiviaChannel, type LumiviaChatChannel } from "@/stores/use-config-store";
 
 const MAIN_ORIGIN = "https://api.lumivia.cn";
 const text = (key: string) => i18n.t(`config.lumivia.${key}`);
 
-type Account = { id: number; email: string; group: string; prices: Record<string, number>; models: string[] };
+type Account = { id: number; email: string; group: string; prices: Record<string, number>; models: string[]; imageWarning?: string; chatChannels?: LumiviaChatChannel[] };
 type ImageAction = "generations" | "edits";
-type Request = { action: "account" } | { action: ImageAction; challenge: string; accountId: number };
+type GrantTarget = { action: ImageAction } | { action: "chat"; channelId: string; model: string };
+type Request = { action: "account" } | (GrantTarget & { challenge: string; accountId: number });
 type Reply = { status: number; account?: Account; grant?: string; error?: string };
 type Pending = { send: () => void; finish: (value: Reply) => void };
 
@@ -22,7 +23,7 @@ const pending = new Map<number, Pending>();
 function authorize(request: Request): Promise<Reply> {
     return new Promise((resolve) => {
         const id = ++requestId;
-        const timer = window.setTimeout(() => finish({ status: 503 }), 8000);
+        const timer = window.setTimeout(() => finish({ status: 503 }), 20000);
         function finish(reply: Reply) {
             window.clearTimeout(timer);
             pending.delete(id);
@@ -68,13 +69,21 @@ export function lumiviaImageAccount() {
     return { id: account.id, version: accountVersion };
 }
 
-export async function lumiviaImageHeaders(action: ImageAction, account: ReturnType<typeof lumiviaImageAccount>, signal?: AbortSignal) {
+export function lumiviaImageHeaders(action: ImageAction, account: ReturnType<typeof lumiviaImageAccount>, signal?: AbortSignal) {
+    return lumiviaGrantHeaders({ action }, account, signal);
+}
+
+export function lumiviaChatHeaders(channelId: string, model: string, account: ReturnType<typeof lumiviaImageAccount>, signal?: AbortSignal) {
+    return lumiviaGrantHeaders({ action: "chat", channelId, model }, account, signal);
+}
+
+async function lumiviaGrantHeaders(target: GrantTarget, account: ReturnType<typeof lumiviaImageAccount>, signal?: AbortSignal) {
     const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
     signal?.throwIfAborted();
     if (account.version !== accountVersion) throw new Error(text("accountChanged"));
     const verifier = hex(crypto.getRandomValues(new Uint8Array(32)));
     const challenge = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
-    const reply = await authorize({ action, challenge, accountId: account.id });
+    const reply = await authorize({ ...target, challenge, accountId: account.id });
     signal?.throwIfAborted();
     if (account.version !== accountVersion) throw new Error(text("accountChanged"));
     if (reply.status !== 200 || !reply.grant) {

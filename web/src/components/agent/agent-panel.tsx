@@ -2,7 +2,9 @@ import { useState, type PointerEvent as ReactPointerEvent } from "react";
 import { motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 
-import { LocalAgentPanel } from "./local-agent-panel";
+import { useLocation } from "react-router-dom";
+import { LumiviaAgentChat } from "./lumivia-agent-chat";
+import { useLumiviaAccount } from "@/components/layout/lumivia-account";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { CANVAS_AGENT_PANEL_MOTION_MS, useAgentStore } from "@/stores/use-agent-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -38,11 +40,13 @@ export function AgentPanel() {
         window.addEventListener("pointerup", onUp);
     };
 
-    if (!panelMounted) return null;
+    const accountId = useLumiviaAccount((s) => s.account?.id);
+    const { pathname } = useLocation();
 
     return (
         <motion.div
-            className="relative z-[70] flex h-full shrink-0"
+            className={panelMounted ? "relative z-[70] flex h-full shrink-0" : "hidden"}
+            inert={!panelOpen}
             initial={{ width: 0, opacity: 0 }}
             animate={{ width: panelOpen ? width + 1 : 0, opacity: panelOpen ? 1 : 0 }}
             transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
@@ -57,7 +61,7 @@ export function AgentPanel() {
                 style={{ width, background: theme.node.panel, borderColor: theme.node.stroke, color: theme.node.text }}
             >
                 <button type="button" className="absolute inset-y-0 left-0 z-40 w-4 -translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("agent.panel.resize")} />
-                <LocalAgentPanel embedded />
+                <LumiviaAgentChat key={`${accountId ?? "guest"}:${pathname}`} />
             </motion.aside>
         </motion.div>
     );

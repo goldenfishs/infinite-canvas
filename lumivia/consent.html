@@ -20,7 +20,7 @@ window.addEventListener('message', async (event) => {
         const response = await fetch('/canvas-connect/approve', {
             method: 'POST', cache: 'no-store',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${current}` },
-            body: JSON.stringify({ action: request.action, challenge: request.challenge, account_id: request.accountId }),
+            body: JSON.stringify({ action: request.action, challenge: request.challenge, account_id: request.accountId, channel_id: request.channelId, model: request.model }),
         });
         const body = await response.json();
         // A request begun before switching accounts cannot return a usable grant.

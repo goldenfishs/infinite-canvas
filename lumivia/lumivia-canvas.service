@@ -3,6 +3,7 @@ Description=Lumivia canvas account bridge
 After=network.target
 
 [Service]
+LoadCredential=canvas-key-seed:/etc/lumivia-canvas/key-seed
 ExecStart=/usr/bin/python3 /opt/infinite-canvas/lumivia/bridge.py
 Restart=on-failure
 DynamicUser=yes

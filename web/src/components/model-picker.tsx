@@ -86,7 +86,8 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
 }
 
 function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
-    if (capability && capability !== "image") return i18n.t("config.lumivia.unsupported");
+    if (capability === "text" && config.channels.length) return i18n.t("config.lumivia.noChat");
+    if (capability && capability !== "text" && capability !== "image") return i18n.t("config.lumivia.unsupported");
     return i18n.t(config.models.length ? "config.lumivia.unavailableModel" : "config.lumivia.accountRequired");
 }
 

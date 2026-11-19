@@ -15,6 +15,7 @@ port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print
 name=lumivia-canvas-$rev
 docker run -d --name "$name" --restart unless-stopped --security-opt no-new-privileges --entrypoint nginx -v "$rel/dist:/usr/share/nginx/html:ro" -p "127.0.0.1:$port:3000" "$old" -g 'daemon off;' >/dev/null
 curl -fsS --retry 6 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$port/canvas" -o /dev/null || { docker rm -f "$name" >/dev/null; exit 1; }
+bash "$rel/lumivia/install-key-guard.sh" "$rel" || { docker rm -f "$name" >/dev/null; exit 1; }
 site=/etc/nginx/sites-available
 cp "$site/lumivia-canvas" "$rel/canvas.before"; cp "$site/sub2api" "$rel/sub2.before"
 bridge=/opt/lumivia-canvas-bridge
@@ -22,14 +23,14 @@ backup=$rel/bridge.before
 install -d -m700 "$backup"
 unit=/etc/systemd/system/lumivia-canvas.service
 if [[ -f "$unit" ]]; then cp "$unit" "$backup/service"; fi
-for file in bridge.py consent.html entry.html; do
+for file in bridge.py managed_keys.py consent.html entry.html; do
     if [[ -f "$bridge/$file" ]]; then cp "$bridge/$file" "$backup/"; fi
 done
 rollback() {
     trap - ERR
     cp "$rel/canvas.before" "$site/lumivia-canvas"
     cp "$rel/sub2.before" "$site/sub2api"
-    for file in bridge.py consent.html entry.html; do
+    for file in bridge.py managed_keys.py consent.html entry.html; do
         if [[ -f "$backup/$file" ]]; then install -m644 "$backup/$file" "$bridge/"; else rm -f "$bridge/$file"; fi
     done
     if [[ -f "$backup/service" ]]; then
@@ -47,7 +48,7 @@ rollback() {
 trap rollback ERR
 # The original installation directory is root-only; use a traversable dedicated service tree.
 install -d -m755 /opt/lumivia-canvas-bridge
-install -m644 "$rel"/lumivia/{bridge.py,consent.html,entry.html} /opt/lumivia-canvas-bridge/
+install -m644 "$rel"/lumivia/{bridge.py,managed_keys.py,consent.html,entry.html} /opt/lumivia-canvas-bridge/
 sed 's|/opt/infinite-canvas/lumivia/|/opt/lumivia-canvas-bridge/|' "$rel/lumivia/lumivia-canvas.service" > "$unit"
 systemctl daemon-reload
 systemctl enable --now lumivia-canvas.service

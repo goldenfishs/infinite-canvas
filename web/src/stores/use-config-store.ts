@@ -71,7 +71,8 @@ export const CONFIG_STORE_KEY = "infinite-canvas:ai_config_store";
 const CHANNEL_MODEL_SEPARATOR = "::";
 const LUMIVIA_CHANNEL_ID = "lumivia-image";
 const LUMIVIA_BASE_URL = "/lumivia";
-let lumiviaChannel: ModelChannel | undefined;
+export type LumiviaChatChannel = { id: string; name: string; models: string[] };
+let lumiviaChannels: ModelChannel[] = [];
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 export const LOCAL_PROXY_PACKAGE = "@basketikun/canvas-proxy";
@@ -194,45 +195,36 @@ function isAiConfigReady(config: AiConfig, model: string) {
 }
 
 /** Provider state comes from the current account, never from saved or imported data. */
-export function withLumiviaChannel(config: AiConfig, channel: ModelChannel | null | undefined = lumiviaChannel): AiConfig {
-    const channels = channel ? [channel] : [];
-    const models = modelOptionsFromChannels(channels);
-    const selected = normalizeModelOptionValue(typeof config.imageModel === "string" ? config.imageModel : "", channels);
-    const preferred = encodeChannelModel(LUMIVIA_CHANNEL_ID, "gpt-image-2");
-    const imageModel = models.includes(selected) ? selected : models.includes(preferred) ? preferred : models[0] || "";
+export function withLumiviaChannel(config: AiConfig, channels: ModelChannel[] = lumiviaChannels): AiConfig {
+    const select = (capability: ModelCapability, value: string, preferred = "") => {
+        const options = selectableModelsByCapability({ ...config, channels }, capability);
+        const selected = normalizeModelOptionValue(typeof value === "string" ? value : "", channels);
+        return options.includes(selected) ? selected : options.includes(preferred) ? preferred : options[0] || "";
+    };
+    const imageModel = select("image", config.imageModel, encodeChannelModel(LUMIVIA_CHANNEL_ID, "gpt-image-2"));
     return {
-        ...config,
-        channelMode: "local",
-        apiFormat: "openai",
-        baseUrl: channel?.baseUrl || "",
-        apiKey: channel?.apiKey || "",
-        channels,
-        models,
-        model: imageModel,
-        imageModel,
-        videoModel: "",
-        textModel: "",
-        audioModel: "",
-        proxyEnabled: false,
-        proxyUrl: DEFAULT_LOCAL_PROXY_URL,
+        ...config, channelMode: "local", apiFormat: "openai",
+        baseUrl: channels[0]?.baseUrl || "", apiKey: channels[0]?.apiKey || "",
+        channels, models: modelOptionsFromChannels(channels), model: imageModel, imageModel,
+        textModel: select("text", config.textModel), videoModel: "", audioModel: "",
+        proxyEnabled: false, proxyUrl: DEFAULT_LOCAL_PROXY_URL,
     };
 }
 
-export function setLumiviaChannel(account: { group: string; models: string[] } | null) {
-    const previous = useConfigStore.getState().config;
-    lumiviaChannel = account ? {
-        id: LUMIVIA_CHANNEL_ID,
-        name: account.group,
-        baseUrl: LUMIVIA_BASE_URL,
-        apiKey: "canvas-session",
-        apiFormat: "openai",
-        models: account.models.map((name) => ({ name, capability: "image" })),
-    } : undefined;
-    useConfigStore.setState({ config: withLumiviaChannel(previous) });
+export function setLumiviaChannel(account: { group: string; models: string[]; chatChannels?: LumiviaChatChannel[] } | null) {
+    const channel = (id: string, name: string, models: string[], capability: ModelCapability): ModelChannel => ({
+        id, name, baseUrl: LUMIVIA_BASE_URL, apiKey: "canvas-session", apiFormat: "openai",
+        models: models.map((name) => ({ name, capability })),
+    });
+    lumiviaChannels = account ? [
+        channel(LUMIVIA_CHANNEL_ID, account.group, account.models, "image"),
+        ...(account.chatChannels || []).map((item) => channel(item.id, item.name, item.models, "text")),
+    ] : [];
+    useConfigStore.setState(({ config }) => ({ config: withLumiviaChannel(config) }));
 }
 
 export function configWithoutChannels(config: AiConfig): AiConfig {
-    return { ...withLumiviaChannel(config, null), imageModel: config.imageModel, model: config.imageModel };
+    return { ...withLumiviaChannel(config, []), imageModel: config.imageModel, model: config.imageModel, textModel: config.textModel };
 }
 
 export const useConfigStore = create<ConfigStore>()(
@@ -277,6 +269,7 @@ export const useConfigStore = create<ConfigStore>()(
                         ...withLumiviaChannel(config),
                         // Preserve only the model preference until the account supplies its catalog.
                         imageModel: typeof config.imageModel === "string" ? config.imageModel : "",
+                        textModel: typeof config.textModel === "string" ? config.textModel : "",
                         audioVoice: config.audioVoice || defaultConfig.audioVoice,
                         audioFormat: config.audioFormat || defaultConfig.audioFormat,
                         audioSpeed: config.audioSpeed || defaultConfig.audioSpeed,
@@ -375,15 +368,15 @@ export function resolveModelScript(config: AiConfig, value: string) {
 }
 
 export function resolveModelRequestConfig(config: AiConfig, value: string, capability: ModelCapability) {
-    if (capability !== "image") throw new Error(i18n.t("config.lumivia.unsupported"));
-    const channel = lumiviaChannel;
-    if (!channel) throw new Error(i18n.t("config.lumivia.accountRequired"));
+    if (capability !== "image" && capability !== "text") throw new Error(i18n.t("config.lumivia.unsupported"));
+    if (!lumiviaChannels.length) throw new Error(i18n.t("config.lumivia.accountRequired"));
     const selected = decodeChannelModel(value);
     const name = selected?.model || value;
-    if ((selected && selected.channelId !== channel.id) || !channel.models.some((model) => model.name === name)) {
-        throw new Error(i18n.t("config.lumivia.unavailableModel"));
-    }
-    return { ...config, model: name, baseUrl: LUMIVIA_BASE_URL, apiKey: channel.apiKey, apiFormat: channel.apiFormat };
+    const candidates = lumiviaChannels.filter((channel) => (!selected || channel.id === selected.channelId)
+        && channel.models.some((model) => model.name === name && model.capability === capability));
+    if (candidates.length !== 1) throw new Error(i18n.t("config.lumivia.unavailableModel"));
+    const channel = candidates[0];
+    return { ...config, model: name, channelId: channel.id, baseUrl: LUMIVIA_BASE_URL, apiKey: channel.apiKey, apiFormat: channel.apiFormat };
 }
 
 export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
