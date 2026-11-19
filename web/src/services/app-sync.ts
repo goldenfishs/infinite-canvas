@@ -5,7 +5,7 @@ import { getMediaBlob, resolveMediaUrl, setMediaBlob } from "@/services/file-sto
 import { getImageBlob, resolveImageUrl, setImageBlob } from "@/services/image-storage";
 import { downloadWebdavFile, uploadWebdavFile, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import type { Asset } from "@/stores/use-asset-store";
-import { useAssetStore } from "@/stores/use-asset-store";
+import { ensureAssetsLoaded, useAssetStore } from "@/stores/use-asset-store";
 import type { WebdavSyncConfig } from "@/stores/use-config-store";
 import type { CanvasDeletedProject, CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -83,7 +83,7 @@ const storageKeyPattern = /^(image|video|audio|file|video-reference|audio-refere
 
 export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?: AppSyncProgress): Promise<AppSyncResult> {
     emitProgress(onProgress, { stage: "等待本地数据加载" });
-    await Promise.all([waitForHydration(useCanvasStore), waitForHydration(useAssetStore)]);
+    await Promise.all([waitForHydration(useCanvasStore), ensureAssetsLoaded()]);
 
     const [canvas, assets, imageLogs, videoLogs] = await Promise.all([
         syncDomain<CanvasDomainData>(config, onProgress, {
@@ -288,6 +288,9 @@ async function readStoredLogs(store: LogStore) {
 }
 
 async function replaceStoredLogs(store: LogStore, logs: StoredLog[]) {
+    if (store === imageLogStore) await Promise.all(["image_generation_log_index", "image_generation_log_thumbnails"].map(
+        (storeName) => localforage.createInstance({ name: "infinite-canvas", storeName }).clear(),
+    ));
     await store.clear();
     await runWithConcurrency(logs, FILE_CONCURRENCY, async (log) => {
         const id = getStringField(log, "id");

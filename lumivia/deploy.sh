@@ -23,14 +23,14 @@ backup=$rel/bridge.before
 install -d -m700 "$backup"
 unit=/etc/systemd/system/lumivia-canvas.service
 if [[ -f "$unit" ]]; then cp "$unit" "$backup/service"; fi
-for file in bridge.py managed_keys.py consent.html entry.html; do
+for file in bridge.py cloud_storage.py managed_keys.py consent.html entry.html; do
     if [[ -f "$bridge/$file" ]]; then cp "$bridge/$file" "$backup/"; fi
 done
 rollback() {
     trap - ERR
     cp "$rel/canvas.before" "$site/lumivia-canvas"
     cp "$rel/sub2.before" "$site/sub2api"
-    for file in bridge.py managed_keys.py consent.html entry.html; do
+    for file in bridge.py cloud_storage.py managed_keys.py consent.html entry.html; do
         if [[ -f "$backup/$file" ]]; then install -m644 "$backup/$file" "$bridge/"; else rm -f "$bridge/$file"; fi
     done
     if [[ -f "$backup/service" ]]; then
@@ -48,7 +48,7 @@ rollback() {
 trap rollback ERR
 # The original installation directory is root-only; use a traversable dedicated service tree.
 install -d -m755 /opt/lumivia-canvas-bridge
-install -m644 "$rel"/lumivia/{bridge.py,managed_keys.py,consent.html,entry.html} /opt/lumivia-canvas-bridge/
+install -m644 "$rel"/lumivia/{bridge.py,cloud_storage.py,managed_keys.py,consent.html,entry.html} /opt/lumivia-canvas-bridge/
 sed 's|/opt/infinite-canvas/lumivia/|/opt/lumivia-canvas-bridge/|' "$rel/lumivia/lumivia-canvas.service" > "$unit"
 systemctl daemon-reload
 systemctl enable --now lumivia-canvas.service

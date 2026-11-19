@@ -6,9 +6,9 @@ import { setLumiviaChannel, type LumiviaChatChannel } from "@/stores/use-config-
 const MAIN_ORIGIN = "https://api.lumivia.cn";
 const text = (key: string) => i18n.t(`config.lumivia.${key}`);
 
-type Account = { id: number; email: string; group: string; prices: Record<string, number>; models: string[]; imageWarning?: string; chatChannels?: LumiviaChatChannel[] };
+type Account = { id: number; email: string; isAdmin?: boolean; group: string; prices: Record<string, number>; models: string[]; imageWarning?: string; chatChannels?: LumiviaChatChannel[] };
 type ImageAction = "generations" | "edits";
-type GrantTarget = { action: ImageAction } | { action: "chat"; channelId: string; model: string };
+type GrantTarget = { action: ImageAction | "storage" | "storage-admin" } | { action: "chat"; channelId: string; model: string };
 type Request = { action: "account" } | (GrantTarget & { challenge: string; accountId: number });
 type Reply = { status: number; account?: Account; grant?: string; error?: string };
 type Pending = { send: () => void; finish: (value: Reply) => void };
@@ -75,6 +75,10 @@ export function lumiviaImageHeaders(action: ImageAction, account: ReturnType<typ
 
 export function lumiviaChatHeaders(channelId: string, model: string, account: ReturnType<typeof lumiviaImageAccount>, signal?: AbortSignal) {
     return lumiviaGrantHeaders({ action: "chat", channelId, model }, account, signal);
+}
+
+export function lumiviaStorageHeaders(admin: boolean, account: ReturnType<typeof lumiviaImageAccount>, signal?: AbortSignal) {
+    return lumiviaGrantHeaders({ action: admin ? "storage-admin" : "storage" }, account, signal);
 }
 
 async function lumiviaGrantHeaders(target: GrantTarget, account: ReturnType<typeof lumiviaImageAccount>, signal?: AbortSignal) {

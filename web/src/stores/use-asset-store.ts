@@ -28,7 +28,7 @@ type AssetBase<T extends AssetKind> = {
 type AssetStore = {
     hydrated: boolean;
     assets: Asset[];
-    addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt">) => string;
+    addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt">) => Promise<string>;
     updateAsset: (id: string, patch: Partial<Omit<Asset, "id" | "createdAt">>) => void;
     removeAsset: (id: string) => void;
     replaceAssets: (assets: Asset[]) => void;
@@ -77,7 +77,8 @@ export const useAssetStore = create<AssetStore>()(
         (set, get) => ({
             hydrated: false,
             assets: [],
-            addAsset: (asset) => {
+            addAsset: async (asset) => {
+                await ensureAssetsLoaded();
                 const now = new Date().toISOString();
                 const id = nanoid();
                 set((state) => ({ assets: [{ ...asset, id, createdAt: now, updatedAt: now } as Asset, ...state.assets] }));
@@ -97,6 +98,8 @@ export const useAssetStore = create<AssetStore>()(
             cleanupImages: (extra) => {
                 window.setTimeout(async () => {
                     const { useCanvasStore } = await import("@/stores/canvas/use-canvas-store");
+                    await ensureAssetsLoaded().catch(() => undefined);
+                    if (!useAssetStore.persist.hasHydrated()) return;
                     await cleanupUnusedImages({ assets: get().assets, projects: useCanvasStore.getState().projects, extra });
                     await cleanupUnusedMedia({ assets: get().assets, projects: useCanvasStore.getState().projects, extra });
                 }, 0);
@@ -104,11 +107,22 @@ export const useAssetStore = create<AssetStore>()(
         }),
         {
             name: ASSET_STORE_KEY,
+            skipHydration: true,
             storage: assetStorage,
             partialize: (state) => ({ assets: state.assets }) as StorageValue<AssetStore>["state"],
-            onRehydrateStorage: () => () => {
-                useAssetStore.setState({ hydrated: true });
+            onRehydrateStorage: () => (state, error) => {
+                if (state && !error) useAssetStore.setState({ hydrated: true });
             },
         },
     ),
 );
+
+let loadingAssets: Promise<void> | undefined;
+
+export function ensureAssetsLoaded() {
+    if (useAssetStore.persist.hasHydrated()) return Promise.resolve();
+    loadingAssets ??= Promise.resolve(useAssetStore.persist.rehydrate()).then(() => {
+        if (!useAssetStore.persist.hasHydrated()) throw new Error("无法读取本机资产");
+    }).finally(() => { loadingAssets = undefined; });
+    return loadingAssets;
+}

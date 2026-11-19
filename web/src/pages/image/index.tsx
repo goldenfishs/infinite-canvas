@@ -1,13 +1,14 @@
-import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, CloudUpload, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
 import localforage from "localforage";
 import { saveAs } from "file-saver";
+import { Link } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
 import { ModelPicker } from "@/components/model-picker";
-import { useLumiviaAccount } from "@/components/layout/lumivia-account";
+import { lumiviaImageAccount, useLumiviaAccount } from "@/components/layout/lumivia-account";
 import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -16,8 +17,10 @@ import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } f
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { dataUrlToFile, formatBytes, formatDuration, getDataUrlByteSize } from "@/lib/image-utils";
+import { cloudStorage } from "@/services/api/cloud-storage";
+import { createImageThumbnail } from "@/lib/image-thumbnail";
 import { requestEdit, requestGeneration } from "@/services/api/image";
-import { deleteStoredImages, ensureImagePreview, getImagePreviewRevision, imageToDataUrl, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
+import { deleteStoredImages, ensureImagePreview, fetchImageBlob, getImagePreviewRevision, imageToDataUrl, previewUrlFor, resolveImageUrl, subscribeImagePreviews, uploadImage } from "@/services/image-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import type { ReferenceImage } from "@/types/image";
@@ -61,6 +64,8 @@ type GenerationLog = {
     localSave?: "pending" | "failed" | "links";
 };
 
+type LogSummary = Omit<GenerationLog, "references" | "images"> & { thumbnail?: string };
+
 type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
@@ -68,6 +73,11 @@ type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => 
 const LOCAL_SAVE_NOTICE_MS = 12_000;
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
 const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
+
+const logIndex = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_log_index" });
+const logThumbnails = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_log_thumbnails" });
+const LOG_PAGE_SIZE = 20;
+const LEGACY_BATCH_SIZE = 8;
 
 export default function ImagePage() {
     const { message } = App.useApp();
@@ -84,7 +94,13 @@ export default function ImagePage() {
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [results, setResults] = useState<GenerationResult[]>([]);
-    const [logs, setLogs] = useState<GenerationLog[]>([]);
+    const [logs, setLogs] = useState<LogSummary[]>([]);
+    const [visibleCount, setVisibleCount] = useState(LOG_PAGE_SIZE);
+    const [legacyKeys, setLegacyKeys] = useState<string[]>([]);
+    const [legacyLoading, setLegacyLoading] = useState(false);
+    const pendingLogs = useRef(new Map<string, GenerationLog>());
+    const previewVersion = useRef(0);
+    const visibleLogs = logs.slice(0, visibleCount);
     const [running, setRunning] = useState(false);
     const busy = useRef(false);
     const removedLogs = useRef(new Set<string>());
@@ -107,6 +123,7 @@ export default function ImagePage() {
 
     const model = effectiveConfig.imageModel || effectiveConfig.model;
     const checkingAccount = useLumiviaAccount((state) => !state.account && state.syncing);
+    const signedIn = useLumiviaAccount((state) => !!state.account);
     const accountError = useLumiviaAccount((state) => state.error);
     const canGenerate = Boolean(prompt.trim()) && isAiConfigReady(effectiveConfig, model);
     const generationCount = Math.max(1, Math.min(10, Number(config.count) || 1));
@@ -119,11 +136,35 @@ export default function ImagePage() {
 
     useEffect(() => {
         let mounted = true;
-        void readStoredLogs().then((saved) => {
-            if (mounted) setLogs((current) => [...current, ...saved.filter((log) => !removedLogs.current.has(log.id) && !current.some((item) => item.id === log.id))]);
-        });
+        void readLogIndex().then(({ saved, legacy }) => {
+            if (!mounted) return;
+            setLogs((current) => [...current, ...saved.filter((log) => !removedLogs.current.has(log.id) && !current.some((item) => item.id === log.id))]);
+            setLegacyKeys(legacy);
+        }).catch(() => { if (mounted) message.warning("暂时无法读取本机历史列表"); });
         return () => { mounted = false; };
-    }, []);
+    }, [message]);
+
+    const loadLegacy = async () => {
+        setLegacyLoading(true);
+        const batch = legacyKeys.slice(0, LEGACY_BATCH_SIZE);
+        const summaries: LogSummary[] = [];
+        try {
+            // Old IndexedDB rows contain the original inline. Touch one at a time,
+            // only after explicitly opening old history, and keep only metadata.
+            for (const id of batch) {
+                const log = await logStore.getItem<GenerationLog>(id);
+                if (!log || removedLogs.current.has(id)) continue;
+                const summary = summarizeLog(log, id);
+                await logIndex.setItem(id, summary);
+                summaries.push(summary);
+            }
+            setLegacyKeys((keys) => keys.slice(batch.length));
+            setVisibleCount((count) => count + summaries.length);
+            setLogs((current) => [...current.filter((item) => !summaries.some((saved) => saved.id === item.id)), ...summaries.filter((item) => !removedLogs.current.has(item.id))].sort(newestFirst));
+        } catch {
+            message.warning("暂时无法读取较早的本机记录");
+        } finally { setLegacyLoading(false); }
+    };
 
     const addReferences = async (files?: FileList | null) => {
         const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
@@ -187,6 +228,7 @@ export default function ImagePage() {
         setElapsedMs(0);
         setRunning(true);
         if (agentTaskId) updateAgentTask(agentTaskId, { status: "running", error: undefined });
+        previewVersion.current++;
         setPreviewLog(null);
         const slots = Array.from({ length: generationCount }, () => ({ id: nanoid(), status: "pending" as const }));
         setResults(slots);
@@ -296,7 +338,7 @@ export default function ImagePage() {
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
         const stored = await uploadImage(image.dataUrl);
-        addAsset({
+        await addAsset({
             kind: "image",
             title: t("imageWorkbench.resultTitle", { count: index + 1 }),
             coverUrl: stored.url,
@@ -321,6 +363,7 @@ export default function ImagePage() {
     };
 
     const createSession = () => {
+        previewVersion.current++;
         setPrompt("");
         setReferences([]);
         setResults([]);
@@ -331,12 +374,21 @@ export default function ImagePage() {
     };
 
     const deleteSelectedLogs = () => {
-        const imageKeys = logs.filter((log) => selectedLogIds.includes(log.id)).flatMap((log) => log.images.map((image) => image.storageKey).filter((key): key is string => Boolean(key)));
+        previewVersion.current++;
         const ids = new Set(selectedLogIds);
         setLogs((current) => current.filter((log) => !ids.has(log.id)));
         for (const id of ids) removedLogs.current.add(id);
-        void Promise.all([deleteStoredImages(imageKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).catch(() => message.warning(t("imageWorkbench.historyDeleteFailed")));
-        if (previewLog && selectedLogIds.includes(previewLog.id)) {
+        void (async () => {
+            for (const id of ids) {
+                const log = await logStore.getItem<GenerationLog>(id);
+                await logStore.removeItem(id);
+                await logIndex.removeItem(id);
+                await logThumbnails.removeItem(id);
+                if (log) await deleteStoredImages(log.images.flatMap((image) => image.storageKey ? [image.storageKey] : []));
+                pendingLogs.current.delete(id);
+            }
+        })().catch(() => message.warning(t("imageWorkbench.historyDeleteFailed")));
+        if (previewLog && ids.has(previewLog.id)) {
             setPreviewLog(null);
             setResults([]);
         }
@@ -345,11 +397,11 @@ export default function ImagePage() {
     };
 
     const saveLog = (log: GenerationLog) => {
-        setLogs((current) => [log, ...current]);
-        const status = (localSave?: GenerationLog["localSave"]) => setLogs((current) => current.map((item) => item.id === log.id ? { ...item, localSave } : item));
-        const notice = window.setTimeout(() => status("pending"), LOCAL_SAVE_NOTICE_MS);
-        // Inline responses are already self-contained; preserve them even when image/preview storage is blocked.
-        // For URL-only providers, try to archive the bytes while the signed URL is still valid.
+        pendingLogs.current.set(log.id, log);
+        setLogs((current) => [summarizeLog(log), ...current]);
+        const updateSummary = (changes: Partial<LogSummary>) => setLogs((current) => current.map((item) => item.id === log.id ? { ...item, ...changes } : item));
+        const notice = window.setTimeout(() => updateSummary({ localSave: "pending" }), LOCAL_SAVE_NOTICE_MS);
+        // Preserve inline responses; archive URL-only results while they are still available.
         void (async () => {
             const archived = await Promise.all(log.images.map(async (image) => {
                 if (image.storageKey || image.dataUrl.startsWith("data:")) return image;
@@ -359,21 +411,50 @@ export default function ImagePage() {
             }));
             if (removedLogs.current.has(log.id)) return;
             const localSave = archived.some((image) => !image.storageKey && !image.dataUrl.startsWith("data:")) ? "links" as const : undefined;
-            await logStore.setItem(log.id, serializeLog({ ...log, images: archived, localSave }));
-            status(localSave);
-        })().catch(() => status("failed")).finally(() => window.clearTimeout(notice));
+            const full = { ...log, images: archived, localSave };
+            await logStore.setItem(log.id, serializeLog(full));
+            if (removedLogs.current.has(log.id)) return;
+            const summary = summarizeLog(full);
+            await logIndex.setItem(log.id, summary);
+            pendingLogs.current.delete(log.id);
+            window.clearTimeout(notice);
+            updateSummary({ localSave });
+            const image = archived[0];
+            if (!image?.dataUrl || !/^(data:|blob:)/.test(image.dataUrl)) return;
+            const thumbnail = await historyThumbnail(image.dataUrl).catch(() => undefined);
+            if (thumbnail && !removedLogs.current.has(log.id)) {
+                await logThumbnails.setItem(log.id, thumbnail);
+                updateSummary({ thumbnail });
+            }
+        })().catch(() => updateSummary({ localSave: "failed" })).finally(() => window.clearTimeout(notice));
     };
 
-    const previewGenerationLog = async (log: GenerationLog) => {
-        setPreviewLog(log);
-        setLogsOpen(false);
-        setPrompt(log.prompt);
-        setReferences(log.references || []);
-        if (log.config.imageModel || log.model) updateConfig("imageModel", log.config.imageModel || log.model);
-        if (log.config.quality) updateConfig("quality", log.config.quality);
-        if (log.config.size) updateConfig("size", log.config.size);
-        if (log.config.count) updateConfig("count", log.config.count);
-        setResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
+    const previewGenerationLog = async (summary: LogSummary) => {
+        const version = ++previewVersion.current;
+        try {
+            const raw = pendingLogs.current.get(summary.id) ?? await logStore.getItem<GenerationLog>(summary.id);
+            if (!raw) throw new Error("找不到这条本机记录");
+            const log = await normalizeLog(raw);
+            if (version !== previewVersion.current || removedLogs.current.has(summary.id)) return;
+            setPreviewLog(log);
+            setLogsOpen(false);
+            setPrompt(log.prompt);
+            setReferences(log.references);
+            if (log.config.imageModel || log.model) updateConfig("imageModel", log.config.imageModel || log.model);
+            if (log.config.quality) updateConfig("quality", log.config.quality);
+            if (log.config.size) updateConfig("size", log.config.size);
+            if (log.config.count) updateConfig("count", log.config.count);
+            setResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
+        } catch (error) { if (version === previewVersion.current) message.error((error as Error).message || "无法打开本机记录"); }
+    };
+
+    const saveResultToCloud = async (image: GeneratedImage) => {
+        try {
+            const account = lumiviaImageAccount();
+            const blob = await fetchImageBlob(image.dataUrl || await resolveImageUrl(image.storageKey, ""), { signal: AbortSignal.timeout(60_000) });
+            await cloudStorage.upload(blob, account);
+            message.success(<>已存入 <Link to="/storage" className="underline">云图库</Link></>);
+        } catch (error) { message.error((error as Error).message || "保存云端图片失败"); }
     };
 
     const buildRequestSnapshot = () => {
@@ -438,7 +519,12 @@ export default function ImagePage() {
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
                     <LogPanel
-                        logs={logs}
+                        logs={visibleLogs}
+                        more={logs.length > visibleCount}
+                        onMore={() => setVisibleCount((count) => count + LOG_PAGE_SIZE)}
+                        legacyCount={legacyKeys.length}
+                        legacyLoading={legacyLoading}
+                        onLegacy={() => void loadLegacy()}
                         selectedLogIds={selectedLogIds}
                         activeLogId={previewLog?.id}
                         onSelectedLogIdsChange={setSelectedLogIds}
@@ -574,7 +660,7 @@ export default function ImagePage() {
                             <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
                                 {results.map((result, index) =>
                                     result.status === "success" && result.image ? (
-                                        <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
+                                        <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} onSaveCloud={signedIn ? saveResultToCloud : undefined} />
                                     ) : result.status === "failed" ? (
                                         <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} disabled={running} onRetry={() => retryResult(result.id)} />
                                     ) : (
@@ -604,7 +690,12 @@ export default function ImagePage() {
             />
             <Drawer title={t("workbench.logs")} placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
                 <LogPanel
-                    logs={logs}
+                    logs={visibleLogs}
+                    more={logs.length > visibleCount}
+                    onMore={() => setVisibleCount((count) => count + LOG_PAGE_SIZE)}
+                    legacyCount={legacyKeys.length}
+                    legacyLoading={legacyLoading}
+                    onLegacy={() => void loadLegacy()}
                     selectedLogIds={selectedLogIds}
                     activeLogId={previewLog?.id}
                     onSelectedLogIdsChange={setSelectedLogIds}
@@ -650,18 +741,21 @@ function ResultImageCard({
     onEdit,
     onDownload,
     onSaveAsset,
+    onSaveCloud,
 }: {
     image: GeneratedImage;
     index: number;
     onEdit: (image: GeneratedImage, index: number) => Promise<void>;
     onDownload: (image: GeneratedImage, index: number) => void;
     onSaveAsset: (image: GeneratedImage, index: number) => void;
+    onSaveCloud?: (image: GeneratedImage) => Promise<void>;
 }) {
     const { t } = useTranslation();
     useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
     const [dimensions, setDimensions] = useState("");
     const [failed, setFailed] = useState(false);
     const [addingReference, setAddingReference] = useState(false);
+    const [savingCloud, setSavingCloud] = useState(false);
     const addReference = async () => {
         setAddingReference(true);
         try {
@@ -705,6 +799,10 @@ function ResultImageCard({
                         </Button>
                     </Tooltip>
                 </div>
+                {onSaveCloud && <Button size="small" icon={<CloudUpload className="size-3.5" />} loading={savingCloud} onClick={async () => {
+                    setSavingCloud(true);
+                    try { await onSaveCloud(image); } finally { setSavingCloud(false); }
+                }}>存云端</Button>}
             </div>
         </div>
     );
@@ -756,14 +854,20 @@ function LogPanel({
     onCreateSession,
     onDeleteSelected,
     onPreviewLog,
+    more, onMore, legacyCount, legacyLoading, onLegacy,
 }: {
-    logs: GenerationLog[];
+    logs: LogSummary[];
+    more: boolean;
+    onMore: () => void;
+    legacyCount: number;
+    legacyLoading: boolean;
+    onLegacy: () => void;
     selectedLogIds: string[];
     activeLogId?: string;
     onSelectedLogIdsChange: (ids: string[]) => void;
     onCreateSession: () => void;
     onDeleteSelected: () => void;
-    onPreviewLog: (log: GenerationLog) => void;
+    onPreviewLog: (log: LogSummary) => void;
 }) {
     const { t } = useTranslation();
     const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
@@ -799,16 +903,23 @@ function LogPanel({
                         onClick={() => onPreviewLog(log)}
                     />
                 ))}
-                {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">{t("workbench.noLogs")}</div> : null}
+                {more && <Button block onClick={onMore}>显示更多</Button>}
+                {!!legacyCount && <Button block loading={legacyLoading} onClick={onLegacy}>读取较早的本机记录（剩余 {legacyCount} 条）</Button>}
+                {!logs.length && !legacyCount ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">{t("workbench.noLogs")}</div> : null}
             </div>
         </>
     );
 }
 
-function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
+function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: LogSummary; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
     const { t } = useTranslation();
-    useSyncExternalStore(subscribeImagePreviews, getImagePreviewRevision);
-    const thumbnails = log.images.filter((image) => image.dataUrl).slice(0, 4);
+    const [storedThumbnail, setStoredThumbnail] = useState<string | null>(null);
+    useEffect(() => {
+        let current = true;
+        void logThumbnails.getItem<string>(log.id).then((value) => { if (current) setStoredThumbnail(value); }).catch(() => undefined);
+        return () => { current = false; };
+    }, [log.id]);
+    const thumbnail = log.thumbnail || storedThumbnail;
 
     return (
         <button
@@ -822,13 +933,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                     <div className="min-w-0">
                         <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
                         {log.localSave && <span className="text-xs text-amber-600 dark:text-amber-400">{t(`imageWorkbench.save_${log.localSave}`)}</span>}
-                        {thumbnails.length ? (
-                            <div className="mt-2 flex gap-1 overflow-hidden">
-                                {thumbnails.map((image) => (
-                                    <img key={image.id} src={previewUrlFor(image.storageKey) || image.dataUrl} alt="" className="size-8 shrink-0 rounded-md object-cover" />
-                                ))}
-                            </div>
-                        ) : null}
+                        {thumbnail && <img src={thumbnail} alt="" loading="lazy" decoding="async" className="mt-2 size-8 rounded-md object-cover" />}
                     </div>
                 </div>
                 <div className="grid justify-items-end gap-2">
@@ -857,18 +962,32 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
     );
 }
 
-async function readStoredLogs() {
-    if (typeof window === "undefined") return [];
-    try {
-        const values: GenerationLog[] = [];
-        await logStore.iterate<GenerationLog, void>((value) => {
-            values.push(value);
-        });
-        const logs = await Promise.all(values.map(normalizeLog));
-        return logs.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    } catch {
-        return [];
-    }
+function newestFirst(a: LogSummary, b: LogSummary) {
+    return b.createdAt - a.createdAt;
+}
+
+async function readLogIndex() {
+    const saved: LogSummary[] = [];
+    const [, keys] = await Promise.all([logIndex.iterate<LogSummary, void>((log) => { saved.push(log); }), logStore.keys()]);
+    const indexed = new Set(saved.map((log) => log.id));
+    const existing = new Set(keys);
+    return { saved: saved.filter((log) => existing.has(log.id)).sort(newestFirst), legacy: keys.filter((id) => !indexed.has(id)) };
+}
+
+function summarizeLog(log: GenerationLog, id = log.id): LogSummary {
+    const { references: _references, images: _images, ...summary } = log;
+    return { ...summary, id, title: (log.title || log.model || i18n.t("workbench.untitled")).slice(0, 120), prompt: "", createdAt: log.createdAt || 0 };
+}
+
+async function historyThumbnail(url: string) {
+    const thumbnail = await createImageThumbnail(await fetchImageBlob(url), 96);
+    if (!thumbnail || thumbnail.size > 16 * 1024) return undefined;
+    return new Promise<string | undefined>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => resolve(undefined);
+        reader.readAsDataURL(thumbnail);
+    });
 }
 
 async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog> {

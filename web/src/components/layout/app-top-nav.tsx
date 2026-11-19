@@ -1,4 +1,4 @@
-import { Bot, Menu } from "lucide-react";
+import { Bot, Cloud, Menu } from "lucide-react";
 import { Button, Tooltip } from "antd";
 import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -75,6 +75,9 @@ export function AppTopNav() {
                             <Tooltip title={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")}>
                                 <Button type="text" shape="circle" className="!h-8 !w-8 !min-w-8" icon={<Bot className="size-4" />} onClick={togglePanel} aria-label={t(panelOpen ? "topNav.closeAgent" : "topNav.openAgent")} />
                             </Tooltip>
+                            <Link to="/storage" aria-label="云图库" title="云图库" className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-foreground hover:bg-muted">
+                                <Cloud className="size-4" />
+                            </Link>
                             <UserStatusActions />
                         </div>
                     </div>

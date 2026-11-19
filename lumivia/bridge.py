@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -11,6 +12,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from ipaddress import ip_address, ip_network
 
+from cloud_storage import CloudStorage
 from managed_keys import PREFIX, managed_image_key
 
 import aiohttp
@@ -194,9 +196,9 @@ async def chat_channels(req, api, uid, group_names):
     return [c for c in await asyncio.gather(*(discover(k) for k in keys)) if c]
 
 
-def issue(challenge, action, secret, model=None):
+def issue(challenge, action, subject, model=None):
     grant = secrets.token_urlsafe(32)
-    grants[grant] = (time.monotonic() + 20, challenge, action, secret, model)
+    grants[grant] = (time.monotonic() + 20, challenge, action, subject, model)
     return web.json_response({"grant": grant})
 
 
@@ -208,7 +210,7 @@ async def approve(req):
     action = data.get("action")
     challenge = data.get("challenge")
     auth = req.headers.get("Authorization", "")
-    if action not in ("account", "chat", *IMAGE_ACTIONS) or not auth.startswith("Bearer "):
+    if action not in ("account", "chat", "storage", "storage-admin", *IMAGE_ACTIONS) or not auth.startswith("Bearer "):
         return failure(400, "账号同步请求格式错误")
     if action != "account" and (
         not isinstance(challenge, str)
@@ -242,6 +244,14 @@ async def approve(req):
     uid = user["id"]
     if action != "account" and data["account_id"] != uid:
         return failure(409, "主站账号已切换，请重新同步")
+    is_admin = user.get("role") == "admin"
+    if action in ("storage", "storage-admin"):
+        if action == "storage-admin" and not is_admin:
+            return failure(403, "需要乐米主站管理员权限")
+        req.app["storage"].remember(uid, user["email"])
+        return issue(challenge, action, uid)
+    if action == "account":
+        req.app["storage"].remember(uid, user["email"])
     groups = await api("groups/available")
     names = {g["id"]: g["name"] for g in groups}
     group = next((g for g in groups if g["id"] == GROUP), None)
@@ -298,6 +308,7 @@ async def approve(req):
         {
             "account": {
                 "id": uid,
+                "isAdmin": is_admin,
                 "email": user["email"],
                 "group": names.get(GROUP, ""),
                 "prices": prices,
@@ -382,8 +393,6 @@ async def images(req):
 
 @routes.post("/lumivia/v1/chat/completions")
 async def chat(req):
-    import json
-
     grant = consume(req, "chat")
     if req.content_type != "application/json":
         return failure(415, "对话需要 JSON 格式")
@@ -404,7 +413,32 @@ async def chat(req):
     )
 
 
+@routes.post("/lumivia/storage/{action:list|upload|read|delete|admin-list|admin-default|admin-user}")
+async def storage(req):
+    action = req.match_info["action"]
+    admin = action.startswith("admin-")
+    uid = consume(req, "storage-admin" if admin else "storage")[3]
+    db = req.app["storage"]
+    if action == "upload":
+        return await db.upload(req, uid)
+    if req.content_type != "application/json" or (req.content_length or 0) > 4096:
+        return failure(400, "无效的存储操作")
+    payload = bytearray()
+    async for chunk in req.content.iter_chunked(4096):
+        payload.extend(chunk)
+        if len(payload) > 4096:
+            return failure(400, "无效的存储操作")
+    try:
+        data = json.loads(payload)
+    except (ValueError, UnicodeError):
+        return failure(400, "无效的存储操作")
+    if not isinstance(data, dict):
+        return failure(400, "无效的存储操作")
+    return db.admin_action(action, data) if admin else db.user_action(action, uid, data)
+
+
 async def lifecycle(app):
+    app["storage"] = CloudStorage(os.environ["STATE_DIRECTORY"])
     app["http"] = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=600), cookie_jar=aiohttp.DummyCookieJar()
     )
@@ -425,6 +459,7 @@ async def lifecycle(app):
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     await app["http"].close()
+    app["storage"].db.close()
 
 
 if __name__ == "__main__":
