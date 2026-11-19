@@ -63,17 +63,29 @@ def change(name,rules,up=None):
     b=re.sub(r'    # canvas-bridge begin.*?    # canvas-bridge end\n','',b,flags=re.S)
     at=b.index('    location / {'); b=b[:at]+'    # canvas-bridge begin\n'+rules+'    # canvas-bridge end\n'+b[at:]
     if up: b=re.sub(r'(location / \{\s*proxy_pass http://127.0.0.1:)\d+',lambda m:m[1]+up,b,count=1)
+    if name == 'lumivia-canvas':
+        a=re.sub(r'# canvas-asset-cache begin.*?# canvas-asset-cache end\n','',a,flags=re.S)
+        a=asset_cache+a
     f.write_text(a+b)
 def location(path,extra=''):
     return '    location '+path+' {\n        access_log off;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_pass http://127.0.0.1:3031;\n'+extra+'    }\n'
 change('sub2api',location('= /canvas-entry')+location('= /canvas-connect/')+location('= /canvas-connect/approve'))
+asset_cache = """# canvas-asset-cache begin
+map $upstream_http_content_type $lumivia_canvas_asset_cache {
+    default "";
+    ~^application/javascript "public, max-age=31536000, immutable";
+    ~^text/javascript        "public, max-age=31536000, immutable";
+    ~^text/css               "public, max-age=31536000, immutable";
+}
+# canvas-asset-cache end
+"""
 assets = f"""    location ^~ /assets/ {{
         gzip on;
         gzip_vary on;
         gzip_proxied any;
         gzip_min_length 1024;
         gzip_types application/javascript text/javascript text/css application/json image/svg+xml;
-        add_header Cache-Control "public, max-age=31536000, immutable";
+        add_header Cache-Control $lumivia_canvas_asset_cache;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_pass http://127.0.0.1:{sys.argv[1]};
