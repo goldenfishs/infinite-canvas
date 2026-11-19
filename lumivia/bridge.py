@@ -62,7 +62,8 @@ async def entry(req):
         text=html,
         content_type="text/html",
         headers={
-            "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; frame-src {CANVAS}; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+            # WebKit checks iframe Blob downloads against the embedding document's frame-src.
+            "Content-Security-Policy": f"default-src 'none'; style-src 'unsafe-inline'; frame-src {CANVAS} blob:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
         },
     )
 
